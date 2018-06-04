@@ -20,6 +20,8 @@ import .Documents:
     MetaNode
 
 using Compat
+import Compat.Markdown
+import Compat.Base64: stringmime
 
 
 function expand(doc::Documents.Document)
@@ -28,6 +30,15 @@ function expand(doc::Documents.Document)
         for element in page.elements
             Selectors.dispatch(ExpanderPipeline, element, page, doc)
         end
+        pagecheck(page)
+    end
+end
+
+# run some checks after expanding the page
+function pagecheck(page)
+    # make sure there is no "continued code" lingering around
+    if haskey(page.globals.meta, :ContinuedCode) && !isempty(page.globals.meta[:ContinuedCode])
+        Utilities.warn(page.source, "Code from a continued @example block unused.")
     end
 end
 
@@ -230,7 +241,7 @@ function Selectors.runner(::Type{MetaBlocks}, x, page, doc)
     for (ex, str) in Utilities.parseblock(x.code, doc, page)
         if Utilities.isassign(ex)
             try
-                meta[ex.args[1]] = eval(Main, ex.args[2])
+                meta[ex.args[1]] = Core.eval(Main, ex.args[2])
             catch err
                 push!(doc.internal.errors, :meta_block)
                 Utilities.warn(doc, page, "Failed to evaluate `$(strip(str))` in `@meta` block.", err)
@@ -263,7 +274,7 @@ function Selectors.runner(::Type{DocsBlocks}, x, page, doc)
             failed = true
             continue
         end
-        typesig = eval(curmod, Documenter.DocSystem.signature(ex, str))
+        typesig = Core.eval(curmod, Documenter.DocSystem.signature(ex, str))
 
         object = Utilities.Object(binding, typesig)
         # We can't include the same object more than once in a document.
@@ -291,7 +302,7 @@ function Selectors.runner(::Type{DocsBlocks}, x, page, doc)
         end
 
         # Concatenate found docstrings into a single `MD` object.
-        docstr = Base.Markdown.MD(map(Documenter.DocSystem.parsedoc, docs))
+        docstr = Markdown.MD(map(Documenter.DocSystem.parsedoc, docs))
         docstr.meta[:results] = docs
 
         # Generate a unique name to be used in anchors and links for the docstring.
@@ -321,7 +332,7 @@ function Selectors.runner(::Type{AutoDocsBlocks}, x, page, doc)
     for (ex, str) in Utilities.parseblock(x.code, doc, page)
         if Utilities.isassign(ex)
             try
-                fields[ex.args[1]] = eval(curmod, ex.args[2])
+                fields[ex.args[1]] = Core.eval(curmod, ex.args[2])
             catch err
                 push!(doc.internal.errors, :autodocs_block)
                 Utilities.warn(doc, page, "Failed to evaluate `$(strip(str))` in `@autodocs` block.", err)
@@ -332,7 +343,7 @@ function Selectors.runner(::Type{AutoDocsBlocks}, x, page, doc)
         # Gather and filter docstrings.
         modules = fields[:Modules]
         order = get(fields, :Order, AUTODOCS_DEFAULT_ORDER)
-        pages = get(fields, :Pages, [])
+        pages = map(normpath, get(fields, :Pages, []))
         public = get(fields, :Public, true)
         private = get(fields, :Private, true)
         results = []
@@ -345,7 +356,7 @@ function Selectors.runner(::Type{AutoDocsBlocks}, x, page, doc)
                 category = Documenter.DocSystem.category(binding)
                 if category in order && included
                     for (typesig, docstr) in multidoc.docs
-                        path = docstr.data[:path]
+                        path = normpath(docstr.data[:path])
                         object = Utilities.Object(binding, typesig)
                         if isempty(pages)
                             push!(results, (mod, path, category, object, isexported, docstr))
@@ -413,7 +424,7 @@ function Selectors.runner(::Type{EvalBlocks}, x, page, doc)
         result = nothing
         for (ex, str) in Utilities.parseblock(x.code, doc, page)
             try
-                result = eval(sandbox, ex)
+                result = Core.eval(sandbox, ex)
             catch err
                 push!(doc.internal.errors, :eval_block)
                 Utilities.warn(doc, page, "Failed to evaluate `@eval` block.", err)
@@ -445,35 +456,49 @@ end
 # --------
 
 function Selectors.runner(::Type{ExampleBlocks}, x, page, doc)
-    matched = match(r"^@example[ ]?(.*)$", x.language)
-    matched === nothing && error("invalid '@example' syntax: $(x.language)")
     # The sandboxed module -- either a new one or a cached one from this page.
-    name = matched[1]
+    name = match(r"^@example[ ]?(.*)$", first(split(x.language, ';', limit = 2)))[1]
     sym  = isempty(name) ? gensym("ex-") : Symbol("ex-", name)
     mod  = get!(page.globals.meta, sym, Module(sym))::Module
-    # Evaluate the code block. We redirect STDOUT/STDERR to `buffer`.
+
+    # "parse" keyword arguments to example (we only need to look for continued = true)
+    continued = occursin(r"continued\s*=\s*true", x.language)
+
+    # Evaluate the code block. We redirect stdout/stderr to `buffer`.
     result, buffer = nothing, IOBuffer()
-    for (ex, str) in Utilities.parseblock(x.code, doc, page)
-        (value, success, backtrace, text) = Utilities.withoutput() do
-            cd(dirname(page.build)) do
-                eval(mod, :(ans = $(eval(mod, ex))))
+    if !continued # run the code
+        # check if there is any code wating
+        if haskey(page.globals.meta, :ContinuedCode) && haskey(page.globals.meta[:ContinuedCode], sym)
+            code = page.globals.meta[:ContinuedCode][sym] * '\n' * x.code
+            delete!(page.globals.meta[:ContinuedCode], sym)
+        else
+            code = x.code
+        end
+        for (ex, str) in Utilities.parseblock(code, doc, page)
+            (value, success, backtrace, text) = Utilities.withoutput() do
+                cd(dirname(page.build)) do
+                    Core.eval(mod, Expr(:(=), :ans, ex))
+                end
+            end
+            result = value
+            print(buffer, text)
+            if !success
+                push!(doc.internal.errors, :example_block)
+                Utilities.warn(page.source, "failed to run code block.\n\n$(value)")
+                page.mapping[x] = x
+                return
             end
         end
-        result = value
-        print(buffer, text)
-        if !success
-            push!(doc.internal.errors, :example_block)
-            Utilities.warn(page.source, "failed to run code block.\n\n$(value)")
-            page.mapping[x] = x
-            return
-        end
+    else # store the continued code
+        CC = get!(page.globals.meta, :ContinuedCode, Dict())
+        CC[sym] = get(CC, sym, "") * '\n' * x.code
     end
     # Splice the input and output into the document.
     content = []
     input   = droplines(x.code)
 
     # Special-case support for displaying SVG graphics. TODO: make this more general.
-    output = mimewritable(MIME"image/svg+xml"(), result) ?
+    output = showable(MIME"image/svg+xml"(), result) ?
         Documents.RawHTML(Base.invokelatest(stringmime, MIME"image/svg+xml"(), result)) :
         Markdown.Code(Documenter.DocChecks.result_to_string(buffer, result))
 
@@ -491,7 +516,7 @@ function Selectors.runner(::Type{REPLBlocks}, x, page, doc)
     matched = match(r"^@repl[ ]?(.*)$", x.language)
     matched === nothing && error("invalid '@repl' syntax: $(x.language)")
     name = matched[1]
-    sym  = isempty(name) ? gensym("repl-") : Symbol("repl-", name)
+    sym  = isempty(name) ? gensym("ex-") : Symbol("ex-", name)
     mod  = get!(page.globals.meta, sym, Module(sym))::Module
     code = split(x.code, '\n'; limit = 2)[end]
     result, out = nothing, IOBuffer()
@@ -500,12 +525,12 @@ function Selectors.runner(::Type{REPLBlocks}, x, page, doc)
         input  = droplines(str)
         (value, success, backtrace, text) = Utilities.withoutput() do
             cd(dirname(page.build)) do
-                eval(mod, :(ans = $(eval(mod, ex))))
+                Core.eval(mod, :(ans = $(Core.eval(mod, ex))))
             end
         end
         result = value
         output = if success
-            hide = Base.REPL.ends_with_semicolon(input)
+            hide = Documenter.REPL.ends_with_semicolon(input)
             Documenter.DocChecks.result_to_string(buffer, hide ? nothing : value)
         else
             Documenter.DocChecks.error_to_string(buffer, value, [])
@@ -518,7 +543,7 @@ function Selectors.runner(::Type{REPLBlocks}, x, page, doc)
             println(out, output, "\n")
         end
     end
-    page.mapping[x] = Base.Markdown.Code("julia-repl", rstrip(Utilities.takebuf_str(out)))
+    page.mapping[x] = Markdown.Code("julia-repl", rstrip(String(take!(out))))
 end
 
 # @setup
@@ -560,7 +585,7 @@ end
 # Utilities.
 # ----------
 
-iscode(x::Markdown.Code, r::Regex) = ismatch(r, x.language)
+iscode(x::Markdown.Code, r::Regex) = occursin(r, x.language)
 iscode(x::Markdown.Code, lang)     = x.language == lang
 iscode(x, lang)                    = false
 
@@ -569,7 +594,7 @@ const NAMEDHEADER_REGEX = r"^@id (.+)$"
 function namedheader(h::Markdown.Header)
     if isa(h.text, Vector) && length(h.text) === 1 && isa(h.text[1], Markdown.Link)
         url = h.text[1].url
-        ismatch(NAMEDHEADER_REGEX, url)
+        occursin(NAMEDHEADER_REGEX, url)
     else
         false
     end
@@ -579,10 +604,10 @@ end
 function droplines(code; skip = 0)
     buffer = IOBuffer()
     for line in split(code, '\n')[(skip + 1):end]
-        ismatch(r"^(.*)# hide$", line) && continue
+        occursin(r"^(.*)#\s*hide$", line) && continue
         println(buffer, rstrip(line))
     end
-    strip(Utilities.takebuf_str(buffer), '\n')
+    strip(String(take!(buffer)), '\n')
 end
 
 function prepend_prompt(input)
@@ -593,7 +618,7 @@ function prepend_prompt(input)
         line = rstrip(line)
         println(out, n == 1 ? prompt : padding, line)
     end
-    rstrip(Utilities.takebuf_str(out))
+    rstrip(String(take!(out)))
 end
 
 end

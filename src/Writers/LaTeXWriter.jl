@@ -14,7 +14,7 @@ import ...Documenter:
     Writers
 
 using Compat
-import Base.Markdown: isordered
+import Compat.Markdown
 
 mutable struct Context{I <: IO} <: IO
     io::I
@@ -47,7 +47,7 @@ function render(doc::Documents.Document)
     mktempdir() do path
         cp(joinpath(doc.user.root, doc.user.build), joinpath(path, "build"))
         cd(joinpath(path, "build")) do
-            file = replace("$(doc.user.sitename).tex", " ", "")
+            file = replace("$(doc.user.sitename).tex", " " => "")
             open(file, "w") do io
                 context = Context(io)
                 writeheader(context, doc)
@@ -75,14 +75,14 @@ function render(doc::Documents.Document)
             cp(STYLE, "documenter.sty")
             if hastex()
                 outdir = joinpath(doc.user.root, doc.user.build)
-                pdf = replace("$(doc.user.sitename).pdf", " ", "")
+                pdf = replace("$(doc.user.sitename).pdf", " " => "")
                 try
                     run(`latexmk -f -interaction=nonstopmode -view=none -lualatex -shell-escape $file`)
                 catch err
                     Utilities.warn("failed to compile. Check generated LaTeX file.")
-                    cp(file, joinpath(outdir, file); remove_destination = true)
+                    Compat.cp(file, joinpath(outdir, file); force = true)
                 end
-                cp(pdf, joinpath(outdir, pdf); remove_destination = true)
+                Compat.cp(pdf, joinpath(outdir, pdf); force = true)
             else
                 Utilities.warn("`latexmk` and `lualatex` required for PDF generation.")
             end
@@ -92,7 +92,7 @@ end
 
 function writeheader(io::IO, doc::Documents.Document)
     custom = joinpath(doc.user.root, doc.user.source, "assets", "custom.sty")
-    isfile(custom) ? cp(custom, "custom.sty"; remove_destination = true) : touch("custom.sty")
+    isfile(custom) ? Compat.cp(custom, "custom.sty"; force = true) : touch("custom.sty")
     preamble =
         """
         \\documentclass{memoir}
@@ -261,18 +261,7 @@ const LEXER = Set([
 ])
 
 function latex(io::IO, code::Markdown.Code)
-    language = if isempty(code.language)
-          "none"
-    elseif first(split(code.language)) == "jldoctest"
-        # When the doctests are not being run, Markdown.Code blocks will have jldoctest as
-        # the language attribute. The check here to determine if it is a REPL-type or
-        # script-type doctest should match the corresponding one in DocChecks.jl. This makes
-        # sure that doctests get highlighted the same way independent of whether they're
-        # being run or not.
-        ismatch(r"^julia> "m, code.code) ? "julia-repl" : "julia"
-    else
-        code.language
-    end
+    language = isempty(code.language) ? "none" : code.language
     # the julia-repl is called "jlcon" in Pygments
     language = (language == "julia-repl") ? "jlcon" : language
     if language in LEXER
@@ -337,7 +326,7 @@ function latex(io::IO, md::Markdown.List)
     # \end{itemize}
     #
     pad = ndigits(md.ordered + length(md.items)) + 2
-    fmt = n -> (isordered(md) ? "[$(rpad("$(n + md.ordered - 1).", pad))]" : "")
+    fmt = n -> (Markdown.isordered(md) ? "[$(rpad("$(n + md.ordered - 1).", pad))]" : "")
     wrapblock(io, "itemize") do
         for (n, item) in enumerate(md.items)
             _print(io, "\\item$(fmt(n)) ")
@@ -440,7 +429,7 @@ function latexinline(io::IO, md::Markdown.Link)
     if io.in_header
         latexinline(io, md.text)
     else
-        if contains(md.url, ".md#")
+        if occursin(".md#", md.url)
             file, target = split(md.url, ".md#"; limit = 2)
             id = string(hash(target))
             wrapinline(io, "hyperlink") do

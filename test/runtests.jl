@@ -1,13 +1,5 @@
-if VERSION < v"0.7.0-DEV.2004"
-    const Test = Base.Test
-end
-using Test
-
-if !isdefined(Base, Symbol("@isdefined"))
-    macro isdefined(x)
-        :(isdefined($(esc(QuoteNode(x)))))
-    end
-end
+using Compat.Test
+using Compat: @info
 
 # Build the real docs first.
 include("../docs/make.jl")
@@ -22,9 +14,9 @@ include("missingdocs/make.jl")
 
 # Error reporting.
 println("="^50)
-info("The following errors are expected output.")
+@info("The following errors are expected output.")
 include(joinpath("errors", "make.jl"))
-info("END of expected error output.")
+@info("END of expected error output.")
 println("="^50)
 
 @testset "Documenter" begin
@@ -37,11 +29,17 @@ println("="^50)
     # DocSystem unit tests.
     include("docsystem.jl")
 
+    # DocTest unit tests.
+    include("doctests/doctests.jl")
+
     # DOM Tests.
     include("dom.jl")
 
     # MDFlatten tests.
     include("mdflatten.jl")
+
+    # HTMLWriter
+    include("htmlwriter.jl")
 
     # Mock package docs.
     include("examples/tests.jl")
@@ -50,8 +48,8 @@ println("="^50)
     include("formats/markdown.jl")
     include("formats/latex.jl")
 
-    # Deployment
-    include("errors/deploydocs.jl")
+    # A simple build outside of a Git repository
+    include("nongit/tests.jl")
 end
 
 # Additional tests

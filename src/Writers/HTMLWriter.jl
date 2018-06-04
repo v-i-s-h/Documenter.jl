@@ -21,6 +21,12 @@ the links to the remote repository.
 **`html_edit_branch`** specifies which branch, tag or commit the "Edit on GitHub" links
 point to. It defaults to `master`. If it set to `nothing`, the current commit will be used.
 
+**`html_canonical`** specifies the canonical URL for your documentation. We recommend
+you set this to the base url of your stable documentation, e.g. `https://juliadocs.github.io/Documenter.jl/stable`.
+This allows search engines to know which version to send their users to. [See
+wikipedia for more information](https://en.wikipedia.org/wiki/Canonical_link_element).
+Default is `nothing`, in which case no canonical link is set.
+
 # Page outline
 
 The [`HTMLWriter`](@ref) makes use of the page outline that is determined by the
@@ -59,7 +65,7 @@ Adding an ICO asset is primarilly useful for setting a custom `favicon`.
 module HTMLWriter
 
 using Compat
-import Base.Markdown: isordered
+import Compat.Markdown
 
 import ...Documenter:
     Anchors,
@@ -132,7 +138,7 @@ function render(doc::Documents.Document)
 
     open(joinpath(doc.user.build, ctx.search_index_js), "w") do io
         println(io, "var documenterSearchIndex = {\"docs\": [\n")
-        write(io, Utilities.takebuf_str(ctx.search_index))
+        write(io, String(take!(ctx.search_index)))
         println(io, "]}")
     end
 end
@@ -157,11 +163,11 @@ function copy_asset(file, doc)
     else
         ispath(dirname(dst)) || mkpath(dirname(dst))
         ispath(dst) && Utilities.warn("Overwriting '$dst'.")
-        cp(src, dst, remove_destination=true)
+        Compat.cp(src, dst, force=true)
     end
     assetpath = normpath(joinpath("assets", file))
     # Replace any backslashes in links, if building the docs on Windows
-    return replace(assetpath, '\\', '/')
+    return replace(assetpath, '\\' => '/')
 end
 
 # Page
@@ -209,6 +215,8 @@ function render_head(ctx, navnode)
 
         analytics_script(ctx.doc.user.analytics),
 
+        canonical_link_element(ctx.doc.user.html_canonical, src),
+
         # Stylesheets.
         map(css_links) do each
             link[:href => each, :rel => "stylesheet", :type => "text/css"]
@@ -255,6 +263,17 @@ analytics_script(tracking_id::AbstractString) =
         ga('send', 'pageview');
         """
     )
+
+function canonical_link_element(canonical_link, src)
+   @tags link
+   if canonical_link === nothing
+      return Tag(Symbol("#RAW#"))("")
+   else
+      canonical_link_stripped = rstrip(canonical_link, '/')
+      href = "$canonical_link_stripped/$src"
+      return link[:rel => "canonical", :href => href]
+   end
+end
 
 ## Search page
 # ------------
@@ -416,9 +435,19 @@ function render_article(ctx, navnode)
     end
 
     if !ctx.doc.user.html_disable_git
-        url = Utilities.url(ctx.doc.user.repo, getpage(ctx, navnode).source, commit=ctx.doc.user.html_edit_branch)
+        pageurl = get(getpage(ctx, navnode).globals.meta, :EditURL, getpage(ctx, navnode).source)
+        if Utilities.isabsurl(pageurl)
+            url = pageurl
+        else
+            if !(pageurl == getpage(ctx, navnode).source)
+                # need to set users path relative the page itself
+                pageurl = joinpath(first(splitdir(getpage(ctx, navnode).source)), pageurl)
+            end
+            url = Utilities.url(ctx.doc.user.repo, pageurl, commit=ctx.doc.user.html_edit_branch)
+        end
         if url !== nothing
-            push!(topnav.nodes, a[".edit-page", :href => url](span[".fa"](logo), " Edit on $host"))
+            edit_verb = (ctx.doc.user.html_edit_branch === nothing) ? "View" : "Edit"
+            push!(topnav.nodes, a[".edit-page", :href => url](span[".fa"](logo), " $(edit_verb) on $host"))
         end
     end
     art_header = header(topnav, hr(), render_topbar(ctx, navnode))
@@ -454,14 +483,21 @@ function generate_version_file(dir::AbstractString)
     release_folders = []
     tag_folders = []
     for each in readdir(dir)
-        each in ("stable", "latest")        ? push!(named_folders,   each) :
-        ismatch(r"release\-\d+\.\d+", each) ? push!(release_folders, each) :
-        ismatch(Base.VERSION_REGEX, each)   ? push!(tag_folders,     each) : nothing
+        each in ("stable", "latest")         ? push!(named_folders,   each) :
+        occursin(r"release\-\d+\.\d+", each) ? push!(release_folders, each) :
+        occursin(Base.VERSION_REGEX, each)   ? push!(tag_folders,     each) : nothing
     end
+    # put stable before latest
+    sort!(named_folders, rev = true)
+    # sort tags by version number
+    sort!(tag_folders, lt = (x, y) -> VersionNumber(x) < VersionNumber(y), rev = true)
+    # sort release- folders by version number
+    vnum(x) = VersionNumber(match(r"release\-(\d+\.\d+)", x)[1])
+    sort!(release_folders, lt = (x, y) -> vnum(x) < vnum(y), rev = true)
     open(joinpath(dir, "versions.js"), "w") do buf
         println(buf, "var DOC_VERSIONS = [")
         for group in (named_folders, release_folders, tag_folders)
-            for folder in sort!(group, rev = true)
+            for folder in group
                 println(buf, "  \"", folder, "\",")
             end
         end
@@ -479,7 +515,7 @@ end
 # ------------
 
 """
-Converts recursively a [`Documents.Page`](@ref), `Base.Markdown` or Documenter
+Converts recursively a [`Documents.Page`](@ref), `Markdown` or Documenter
 `*Node` objects into HTML DOM.
 """
 function domify(ctx, navnode)
@@ -529,29 +565,61 @@ search_append(sib, node) = mdflatten(sib.buffer, node)
 
 function search_flush(sib)
     # Replace any backslashes in links, if building the docs on Windows
-    src = replace(sib.src, '\\', '/')
+    src = replace(sib.src, '\\' => '/')
     ref = "$(src)#$(sib.loc)"
-    text = Utilities.takebuf_str(sib.buffer)
+    text = String(take!(sib.buffer))
     println(sib.ctx.search_index, """
     {
-        "location": "$(jsonescape(ref))",
-        "page": "$(jsonescape(sib.page_title))",
-        "title": "$(jsonescape(sib.title))",
-        "category": "$(jsonescape(string(sib.category)))",
-        "text": "$(jsonescape(text))"
+        "location": "$(jsescape(ref))",
+        "page": "$(jsescape(sib.page_title))",
+        "title": "$(jsescape(sib.title))",
+        "category": "$(jsescape(lowercase(string(sib.category))))",
+        "text": "$(jsescape(text))"
     },
     """)
 end
 
-function jsonescape(s)
-    s = replace(s, '\\', "\\\\")
-    s = replace(s, '\n', "\\n")
-    replace(s, '"', "\\\"")
+"""
+Replaces some of the characters in the string with escape sequences so that the strings
+would be valid JS string literals, as per the
+[ECMAScript® 2017 standard](https://www.ecma-international.org/ecma-262/8.0/index.html#sec-literals-string-literals).
+
+Note that it always escapes both potential `"` and `'` closing quotes.
+"""
+function jsescape(s)
+    b = IOBuffer()
+    # From the ECMAScript® 2017 standard:
+    #
+    # > All code points may appear literally in a string literal except for the closing
+    # > quote code points, U+005C (REVERSE SOLIDUS), U+000D (CARRIAGE RETURN), U+2028 (LINE
+    # > SEPARATOR), U+2029 (PARAGRAPH SEPARATOR), and U+000A (LINE FEED).
+    #
+    # https://www.ecma-international.org/ecma-262/8.0/index.html#sec-literals-string-literals
+    for c in s
+        if c === '\u000a'     # LINE FEED,       i.e. \n
+            write(b, "\\n")
+        elseif c === '\u000d' # CARRIAGE RETURN, i.e. \r
+            write(b, "\\r")
+        elseif c === '\u005c' # REVERSE SOLIDUS, i.e. \
+            write(b, "\\\\")
+        elseif c === '\u0022' # QUOTATION MARK,  i.e. "
+            write(b, "\\\"")
+        elseif c === '\u0027' # APOSTROPHE,      i.e. '
+            write(b, "\\'")
+        elseif c === '\u2028' # LINE SEPARATOR
+            write(b, "\\u2028")
+        elseif c === '\u2029' # PARAGRAPH SEPARATOR
+            write(b, "\\u2029")
+        else
+            write(b, c)
+        end
+    end
+    String(take!(b))
 end
 
 function domify(ctx, navnode, node)
     fixlinks!(ctx, navnode, node)
-    mdconvert(node, Base.Markdown.MD())
+    mdconvert(node, Markdown.MD())
 end
 
 function domify(ctx, navnode, anchor::Anchors.Anchor)
@@ -713,7 +781,7 @@ function relhref(from, to)
     pagedir = dirname(from)
     # The regex separator replacement is necessary since otherwise building the docs on
     # Windows will result in paths that have `//` separators which break asset inclusion.
-    replace(relpath(to, isempty(pagedir) ? "." : pagedir), r"[/\\]+", "/")
+    replace(relpath(to, isempty(pagedir) ? "." : pagedir), r"[/\\]+" => "/")
 end
 
 """
@@ -760,7 +828,7 @@ was unable to find any `<h1>` headers).
 function pagetitle(page::Documents.Page)
     title = nothing
     for element in page.elements
-        if isa(element, Base.Markdown.Header{1})
+        if isa(element, Markdown.Header{1})
             title = element.text
             break
         end
@@ -769,7 +837,15 @@ function pagetitle(page::Documents.Page)
 end
 
 function pagetitle(ctx, navnode::Documents.NavNode)
-    navnode.title_override === nothing || return navnode.title_override
+    if navnode.title_override !== nothing
+        # parse title_override as markdown
+        md = Markdown.parse(navnode.title_override)
+        # Markdown.parse results in a paragraph so we need to strip that
+        if !(length(md.content) === 1 && isa(first(md.content), Markdown.Paragraph))
+            error("Bad Markdown provided for page title: '$(navnode.title_override)'")
+        end
+        return first(md.content).content
+    end
 
     if navnode.page !== nothing
         title = pagetitle(getpage(ctx, navnode))
@@ -789,7 +865,7 @@ function collect_subsections(page::Documents.Page)
     sections = []
     title_found = false
     for element in page.elements
-        if isa(element, Base.Markdown.Header) && Utilities.header_level(element) < 3
+        if isa(element, Markdown.Header) && Utilities.header_level(element) < 3
             toplevel = Utilities.header_level(element) === 1
             # Don't include the first header if it is `h1`.
             if toplevel && isempty(sections) && !title_found
@@ -836,18 +912,7 @@ mdconvert(b::Markdown.Bold, parent; kwargs...) = Tag(:strong)(mdconvert(b.text, 
 
 function mdconvert(c::Markdown.Code, parent::MDBlockContext; kwargs...)
     @tags pre code
-    language = if isempty(c.language)
-        "none"
-    elseif first(split(c.language)) == "jldoctest"
-        # When the doctests are not being run, Markdown.Code blocks will have jldoctest as
-        # the language attribute. The check here to determine if it is a REPL-type or
-        # script-type doctest should match the corresponding one in DocChecks.jl. This makes
-        # sure that doctests get highlighted the same way independent of whether they're
-        # being run or not.
-        ismatch(r"^julia> "m, c.code) ? "julia-repl" : "julia"
-    else
-        c.language
-    end
+    language = isempty(c.language) ? "none" : c.language
     pre(code[".language-$(language)"](c.code))
 end
 mdconvert(c::Markdown.Code, parent; kwargs...) = Tag(:code)(c.code)
@@ -870,9 +935,16 @@ function mdconvert(link::Markdown.Link, parent; droplinks=false, kwargs...)
     droplinks ? link_text : Tag(:a)[:href => link.url](link_text)
 end
 
-mdconvert(list::Markdown.List, parent; kwargs...) = (isordered(list) ? Tag(:ol) : Tag(:ul))(map(Tag(:li), mdconvert(list.items, list; kwargs...)))
+mdconvert(list::Markdown.List, parent; kwargs...) = (Markdown.isordered(list) ? Tag(:ol) : Tag(:ul))(map(Tag(:li), mdconvert(list.items, list; kwargs...)))
 
 mdconvert(paragraph::Markdown.Paragraph, parent; kwargs...) = Tag(:p)(mdconvert(paragraph.content, paragraph; kwargs...))
+
+# For compatibility with versions before Markdown.List got the `loose field, Julia PR #26598
+const list_has_loose_field = :loose in fieldnames(Markdown.List)
+function mdconvert(paragraph::Markdown.Paragraph, parent::Markdown.List; kwargs...)
+    content = mdconvert(paragraph.content, paragraph; kwargs...)
+    return (list_has_loose_field && !parent.loose) ? content : Tag(:p)(content)
+end
 
 mdconvert(t::Markdown.Table, parent; kwargs...) = Tag(:table)(
     Tag(:tr)(map(x -> Tag(:th)(mdconvert(x, t; kwargs...)), t.rows[1])),
@@ -882,7 +954,7 @@ mdconvert(t::Markdown.Table, parent; kwargs...) = Tag(:table)(
 mdconvert(expr::Union{Expr,Symbol}, parent; kwargs...) = string(expr)
 
 mdconvert(f::Markdown.Footnote, parent; kwargs...) = footnote(f.id, f.text, parent; kwargs...)
-footnote(id, text::Void, parent; kwargs...) = Tag(:a)[:href => "#footnote-$(id)"]("[$id]")
+footnote(id, text::Nothing, parent; kwargs...) = Tag(:a)[:href => "#footnote-$(id)"]("[$id]")
 function footnote(id, text, parent; kwargs...)
     Tag(:div)[".footnote#footnote-$(id)"](
         Tag(:a)[:href => "#footnote-$(id)"](Tag(:strong)("[$id]")),
@@ -935,7 +1007,7 @@ function fixlinks!(ctx, navnode, link::Markdown.Link)
     end
 
     # Replace any backslashes in links, if building the docs on Windows
-    path = replace(path, '\\', '/')
+    path = replace(path, '\\' => '/')
     link.url = (length(s) > 1) ? "$path#$(last(s))" : String(path)
 end
 
@@ -951,7 +1023,7 @@ function fixlinks!(ctx, navnode, img::Markdown.Image)
     if isfile(joinpath(ctx.doc.user.build, path))
         path = relhref(get_url(ctx, navnode), path)
         # Replace any backslashes in links, if building the docs on Windows
-        img.url = replace(path, '\\', '/')
+        img.url = replace(path, '\\' => '/')
     else
         Utilities.warn("Invalid local image: unresolved path\n    '$(img.url)' in `$(navnode.page)`")
     end

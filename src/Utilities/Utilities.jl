@@ -6,6 +6,8 @@ module Utilities
 using Base.Meta, Compat
 import Base: isdeprecated, Docs.Binding
 using DocStringExtensions
+import Compat.Markdown
+import Compat.Base64: stringmime
 
 # Logging output.
 
@@ -20,15 +22,15 @@ logging(flag::Bool) = __log__[] = flag
 """
 Format and print a message to the user.
 """
-log(msg) = __log__[] ? print_with_color(:magenta, STDOUT, "Documenter: ", msg, "\n") : nothing
+log(msg) = __log__[] ? printstyled(stdout, "Documenter: ", msg, "\n", color=:magenta) : nothing
 
-# Print logging output to the "real" STDOUT.
+# Print logging output to the "real" stdout.
 function log(doc, msg)
-    __log__[] && print_with_color(:magenta, STDOUT, "Documenter: ", msg, "\n")
+    __log__[] && printstyled(stdout, "Documenter: ", msg, "\n", color=:magenta)
     return nothing
 end
 
-debug(msg) = print_with_color(:green, " ?? ", msg, "\n")
+debug(msg) = printstyled(" ?? ", msg, "\n", color=:green)
 
 """
     warn(file, msg)
@@ -40,17 +42,17 @@ where the warning was raised.
 function warn(file, msg)
     if __log__[]
         msg = string(" !! ", msg, " [", file, "]\n")
-        print_with_color(:red, STDOUT, msg)
+        printstyled(stdout, msg, color=:red)
     else
         nothing
     end
 end
-warn(msg) = __log__[] ? print_with_color(:red, STDOUT, " !! ", msg, "\n") : nothing
+warn(msg) = __log__[] ? printstyled(stdout, " !! ", msg, "\n", color=:red) : nothing
 
 function warn(file, msg, err, ex, mod)
     if __log__[]
         warn(file, msg)
-        print_with_color(:red, STDOUT, "\nERROR: $err\n\nexpression '$ex' in module '$mod'\n\n")
+        printstyled(stdout, "\nERROR: $err\n\nexpression '$ex' in module '$mod'\n\n", color=:red)
     else
         nothing
     end
@@ -58,7 +60,7 @@ end
 
 function warn(doc, page, msg, err)
     file = page.source
-    print_with_color(:red, STDOUT, " !! Warning in $(file):\n\n$(msg)\n\nERROR: $(err)\n\n")
+    printstyled(stdout, " !! Warning in $(file):\n\n$(msg)\n\nERROR: $(err)\n\n", color=:red)
 end
 
 # Directory paths.
@@ -92,11 +94,11 @@ srcpath(source, root, file) = normpath(joinpath(relpath(root, source), file))
 Slugify a string into a suitable URL.
 """
 function slugify(s::AbstractString)
-    s = replace(s, r"\s+", "-")
-    s = replace(s, r"^\d+", "")
-    s = replace(s, r"&", "-and-")
-    s = replace(s, r"[^\p{L}\p{P}\d\-]+", "")
-    s = strip(replace(s, r"\-\-+", "-"), '-')
+    s = replace(s, r"\s+" => "-")
+    s = replace(s, r"^\d+" => "")
+    s = replace(s, r"&" => "-and-")
+    s = replace(s, r"[^\p{L}\p{P}\d\-]+" => "")
+    s = strip(replace(s, r"\-\-+" => "-"), '-')
 end
 slugify(object) = string(object) # Non-string slugifying doesn't do anything.
 
@@ -116,8 +118,8 @@ function parseblock(code::AbstractString, doc, page; skip = 0, keywords = true)
     code = string(code, '\n')
     code = last(split(code, '\n', limit = skip + 1))
     # Check whether we have windows-style line endings.
-    offset = contains(code, "\n\r") ? 2 : 1
-    endofstr = endof(code)
+    offset = occursin("\n\r", code) ? 2 : 1
+    endofstr = lastindex(code)
     results = []
     cursor = 1
     while cursor < endofstr
@@ -127,10 +129,10 @@ function parseblock(code::AbstractString, doc, page; skip = 0, keywords = true)
         (ex, ncursor) =
             if keywords && haskey(Docs.keywords, keyword)
                 # adding offset below should be OK, as `\n` and `\r` are single byte
-                (QuoteNode(keyword), cursor + endof(line) + offset)
+                (QuoteNode(keyword), cursor + lastindex(line) + offset)
             else
                 try
-                    parse(code, cursor)
+                    Meta.parse(code, cursor)
                 catch err
                     push!(doc.internal.errors, :parse_error)
                     Utilities.warn(doc, page, "Failed to parse expression.", err)
@@ -156,7 +158,7 @@ function check_kwargs(kws)
     for (k, v) in kws
         println(out, "  ", k, " = ", v)
     end
-    warn(Utilities.takebuf_str(out))
+    warn(String(take!(out)))
 end
 
 # Finding submodules.
@@ -175,7 +177,7 @@ function submodules(modules::Vector{Module})
 end
 function submodules(root::Module, seen = Set{Module}())
     push!(seen, root)
-    for name in names(root, true)
+    for name in Compat.names(root, all=true)
         if Base.isidentifier(name) && isdefined(root, name) && !isdeprecated(root, name)
             object = getfield(root, name)
             if isa(object, Module) && !(object in seen)
@@ -201,7 +203,7 @@ struct Object
     signature :: Type
 
     function Object(b::Binding, signature::Type)
-        m = module_name(b.mod) === b.var ? module_parent(b.mod) : b.mod
+        m = nameof(b.mod) === b.var ? parentmodule(b.mod) : b.mod
         new(Binding(m, b.var), signature)
     end
 end
@@ -330,68 +332,50 @@ filterdocs(other, modules::Set{Module}) = other
 """
 Does the given docstring represent actual documentation or a no docs error message?
 """
-nodocs(x)      = contains(stringmime("text/plain", x), "No documentation found.")
-nodocs(::Void) = false
+nodocs(x) = occursin("No documentation found.", stringmime("text/plain", x))
+nodocs(::Nothing) = false
 
 header_level(::Markdown.Header{N}) where {N} = N
 
-takebuf_str(b) = String(take!(b))
-
-# Finding URLs -- based partially on code from the main Julia repo in `base/methodshow.jl`.
-#
-# Paths on Windows contain backslashes, so the `url` function needs to take care of them.
-# However, the exact formatting is not consistent and depends on whether Julia runs
-# separately or in Cygwin.
-#
-# We get paths from Julia's docsystem, e.g.
-#     Docs.docstr(Docs.Binding(Documenter,:Documenter)).data[:path]
-# and from git
-#     git rev-parse --show-toplevel
-#
-# * Ordinary Windows binaries (both Julia and git)
-#   In this case the paths from the docsystem are Windows-like with backslashes, e.g.:
-#       C:\Users\<user>\.julia\v0.6\Documenter\src\Documenter.jl
-#   But the paths from git have forward slashes, e.g.:
-#       C:/Users/<user>julia/v0.6/Documenter
-#
-# * Running under Cygwin
-#   The paths from the docsystem are the same as before, e.g.:
-#       C:\Users\<user>\.julia\v0.6\Documenter\src\Documenter.jl
-#   However, git returns UNIX-y paths using a /cygdrive mount, e.g.:
-#       /cygdrive/c/<user>/.julia/v0.6/Documenter
-#   We can fix that with `cygpath -m <path>` to get a Windows-like path with forward
-#   slashes, e.g.:
-#       C:/Users/<user>/.julia/v0.6/Documenter)
-#
-# In the docsystem paths we replace the backslashes with forward slashes before we start
-# comparing paths with the ones from git.
-#
-
 """
-    in_cygwin()
+    repo_root(file; dbdir=".git")
 
-Check if we're running under cygwin. Useful when we need to translate cygwin paths to
-windows paths.
+Tries to determine the root directory of the repository containing `file`. If the file is
+not in a repository, the function returns `nothing`.
+
+The `dbdir` keyword argument specifies the name of the directory we are searching for to
+determine if this is a repostory or not. If there is a file called `dbdir`, then it's
+contents is checked under the assumption that it is a Git worktree.
 """
-function in_cygwin()
-    if Compat.Sys.iswindows()
-        try
-            return success(`cygpath -h`)
-        catch
-            return false
+function repo_root(file; dbdir=".git")
+    parent_dir, parent_dir_last = dirname(abspath(file)), ""
+    while parent_dir != parent_dir_last
+        dbdir_path = joinpath(parent_dir, dbdir)
+        isdir(dbdir_path) && return parent_dir
+        # Let's see if this is a worktree checkout
+        if isfile(dbdir_path)
+            contents = chomp(read(dbdir_path, String))
+            if startswith(contents, "gitdir: ")
+                if isdir(contents[9:end])
+                    return parent_dir
+                end
+            end
         end
-    else
-        return false
+        parent_dir, parent_dir_last = dirname(parent_dir), parent_dir
     end
+    return nothing
 end
 
+"""
+    $(SIGNATURES)
+
+Returns the path of `file`, relative to the root of the Git repository, or `nothing` if the
+file is not in a Git repository.
+"""
 function relpath_from_repo_root(file)
     cd(dirname(file)) do
-        root = readchomp(`git rev-parse --show-toplevel`)
-        if in_cygwin()
-            root = readchomp(`cygpath -m "$root"`)
-        end
-        startswith(file, root) ? relpath(file, root) : nothing
+        root = repo_root(file)
+        root !== nothing && startswith(file, root) ? relpath(file, root) : nothing
     end
 end
 
@@ -405,14 +389,14 @@ function url(repo, file; commit=nothing)
     file = realpath(abspath(file))
     remote = getremote(dirname(file))
     isempty(repo) && (repo = "https://github.com/$remote/blob/{commit}{path}")
-    # Replace any backslashes in links, if building the docs on Windows
-    file = replace(file, '\\', '/')
     path = relpath_from_repo_root(file)
     if path === nothing
         nothing
     else
-        repo = replace(repo, "{commit}", commit === nothing ? repo_commit(file) : commit)
-        repo = replace(repo, "{path}", string("/", path))
+        repo = replace(repo, "{commit}" => commit === nothing ? repo_commit(file) : commit)
+        # Note: replacing any backslashes in path (e.g. if building the docs on Windows)
+        repo = replace(repo, "{path}" => string("/", replace(path, '\\' => '/')))
+        repo = replace(repo, "{line}" => "")
         repo
     end
 end
@@ -420,6 +404,7 @@ end
 url(remote, repo, doc) = url(remote, repo, doc.data[:module], doc.data[:path], linerange(doc))
 
 function url(remote, repo, mod, file, linerange)
+    file === nothing && return nothing # needed on julia v0.6, see #689
     remote = getremote(dirname(file))
     isabspath(file) && isempty(remote) && isempty(repo) && return nothing
 
@@ -428,14 +413,13 @@ function url(remote, repo, mod, file, linerange)
         file = realpath(abspath(file))
     end
 
-    # Replace any backslashes in links, if building the docs on Windows
-    file = replace(file, '\\', '/')
     # Format the line range.
     line = format_line(linerange, LineRangeFormatting(repo_host_from_url(repo)))
     # Macro-generated methods such as those produced by `@deprecate` list their file as
     # `deprecated.jl` since that is where the macro is defined. Use that to help
     # determine the correct URL.
     if inbase(mod) || !isabspath(file)
+        file = replace(file, '\\' => '/')
         base = "https://github.com/JuliaLang/julia/blob"
         dest = "base/$file#$line"
         if isempty(Base.GIT_VERSION_INFO.commit)
@@ -452,9 +436,10 @@ function url(remote, repo, mod, file, linerange)
         if path === nothing
             nothing
         else
-            repo = replace(repo, "{commit}", repo_commit(file))
-            repo = replace(repo, "{path}", string("/", path))
-            repo = replace(repo, "{line}", line)
+            repo = replace(repo, "{commit}" => repo_commit(file))
+            # Note: replacing any backslashes in path (e.g. if building the docs on Windows)
+            repo = replace(repo, "{path}" => string("/", replace(path, '\\' => '/')))
+            repo = replace(repo, "{line}" => line)
             repo
         end
     end
@@ -467,7 +452,7 @@ function getremote(dir::AbstractString)
         catch err
             ""
         end
-    m = match(Base.LibGit2.GITHUB_REGEX, remote)
+    m = match(Compat.LibGit2.GITHUB_REGEX, remote)
     if m === nothing
         travis = get(ENV, "TRAVIS_REPO_SLUG", "")
         isempty(travis) ? "" : travis
@@ -492,7 +477,7 @@ function inbase(m::Module)
     if m ≡ Base
         true
     else
-        parent = module_parent(m)
+        parent = parentmodule(m)
         parent ≡ m ? false : inbase(parent)
     end
 end
@@ -506,11 +491,11 @@ end
 #      "https://bitbucket.org/xxx" => RepoBitbucket
 # If no match, returns RepoUnknown
 function repo_host_from_url(repoURL::String)
-    if contains(repoURL, "bitbucket")
+    if occursin("bitbucket", repoURL)
         return RepoBitbucket
-    elseif contains(repoURL, "github")
+    elseif occursin("github", repoURL)
         return RepoGithub
-    elseif contains(repoURL, "gitlab")
+    elseif occursin("gitlab", repoURL)
         return RepoGitlab
     else
         return RepoUnknown
@@ -534,18 +519,22 @@ struct LineRangeFormatting
     function LineRangeFormatting(host::RepoHost)
         if host == RepoBitbucket
             new("", ":")
+        elseif host == RepoGitlab
+            new("L", "-")
         else
             # default is github-style
-            new("L", "-")
+            new("L", "-L")
         end
     end
 end
 
 function format_line(range::Compat.AbstractRange, format::LineRangeFormatting)
-    local top = format_line(first(range), format.prefix)
-    return length(range) <= 1 ? top : string(top, format.separator, format_line(last(range), format.prefix))
+    if length(range) <= 1
+        string(format.prefix, first(range))
+    else
+        string(format.prefix, first(range), format.separator, last(range))
+    end
 end
-format_line(line::Integer, prefix::String) = string(prefix, line)
 
 newlines(s::AbstractString) = count(c -> c === '\n', s)
 newlines(other) = 0
@@ -553,9 +542,22 @@ newlines(other) = 0
 
 # Output redirection.
 # -------------------
+@static if VERSION < v"0.7.0-DEV.3951"
+    link_pipe!(pipe; reader_supports_async = true, writer_supports_async = true) =
+        Base.link_pipe(pipe, julia_only_read = reader_supports_async, julia_only_write = writer_supports_async)
+else
+    import Base: link_pipe!
+end
+@static if isdefined(Base, :with_logger)
+    using Logging
+else # make things a no-op since warnings/info already print to stdout
+    struct ConsoleLogger end
+    ConsoleLogger(io) = ConsoleLogger()
+    with_logger(f, logger) = f()
+end
 
 """
-Call a function and capture all `STDOUT` and `STDERR` output.
+Call a function and capture all `stdout` and `stderr` output.
 
     withoutput(f) --> (result, success, backtrace, output)
 
@@ -564,41 +566,48 @@ where
   * `result` is the value returned from calling function `f`.
   * `success` signals whether `f` has thrown an error, in which case `result` stores the
     `Exception` that was raised.
-  * `backtrace` a `Vector{Ptr{Void}}` produced by `catch_backtrace()` if an error is thrown.
-  * `output` is the combined output of `STDOUT` and `STDERR` during execution of `f`.
+  * `backtrace` a `Vector{Ptr{Cvoid}}` produced by `catch_backtrace()` if an error is thrown.
+  * `output` is the combined output of `stdout` and `stderr` during execution of `f`.
 
 """
 function withoutput(f)
     # Save the default output streams.
-    stdout = STDOUT
-    stderr = STDERR
+    default_stdout = stdout
+    default_stderr = stderr
 
-    # Redirect both the `STDOUT` and `STDERR` streams to a single `Pipe` object.
+    # Redirect both the `stdout` and `stderr` streams to a single `Pipe` object.
     pipe = Pipe()
-    Base.link_pipe(pipe; julia_only_read = true, julia_only_write = true)
+    link_pipe!(pipe; reader_supports_async = true, writer_supports_async = true)
     redirect_stdout(pipe.in)
     redirect_stderr(pipe.in)
+    # Also redirect logging stream to the same pipe
+    logger = ConsoleLogger(pipe.in)
 
     # Bytes written to the `pipe` are captured in `output` and converted to a `String`.
     output = UInt8[]
 
     # Run the function `f`, capturing all output that it might have generated.
     # Success signals whether the function `f` did or did not throw an exception.
-    result, success, backtrace =
+    result, success, backtrace = with_logger(logger) do
         try
-            f(), true, Vector{Ptr{Void}}()
+            f(), true, Vector{Ptr{Cvoid}}()
         catch err
+            # InterruptException should never happen during normal doc-testing
+            # and not being able to abort the doc-build is annoying (#687).
+            isa(err, InterruptException) && rethrow(err)
+
             err, false, catch_backtrace()
         finally
             # Force at least a single write to `pipe`, otherwise `readavailable` blocks.
             println()
             # Restore the original output streams.
-            redirect_stdout(stdout)
-            redirect_stderr(stderr)
+            redirect_stdout(default_stdout)
+            redirect_stderr(default_stderr)
             # NOTE: `close` must always be called *after* `readavailable`.
             append!(output, readavailable(pipe))
             close(pipe)
         end
+    end
     return result, success, backtrace, chomp(String(output))
 end
 
@@ -616,7 +625,7 @@ function issubmodule(sub, mod)
     if (sub === Main) && (mod !== Main)
         return false
     end
-    (sub === mod) || issubmodule(module_parent(sub), mod)
+    (sub === mod) || issubmodule(parentmodule(sub), mod)
 end
 
 """
@@ -624,7 +633,7 @@ end
 
 Checks whether `url` is an absolute URL (as opposed to a relative one).
 """
-isabsurl(url) = ismatch(ABSURL_REGEX, url)
+isabsurl(url) = occursin(ABSURL_REGEX, url)
 const ABSURL_REGEX = r"^[[:alpha:]+-.]+://"
 
 include("DOM.jl")

@@ -1,6 +1,7 @@
 module TextDiff
 
 using Compat
+using DocStringExtensions
 
 # Utilities.
 
@@ -39,14 +40,21 @@ function makediff!(out, weights, X, Y, i, j)
     return out
 end
 
+"""
+$(SIGNATURES)
+
+Splits `text` at `regex` matches, returning an array of substrings. The parts of the string
+that match the regular expression are also included at the ends of the returned strings.
+"""
 function splitby(reg::Regex, text::AbstractString)
     out = SubString{String}[]
-    last = 1
+    token_first = 1
     for each in eachmatch(reg, text)
-        push!(out, SubString(text, last, each.match.offset + each.match.endof))
-        last = each.match.endof + each.offset
+        token_last = each.offset + lastindex(each.match) - 1
+        push!(out, SubString(text, token_first, token_last))
+        token_first = nextind(text, token_last)
     end
-    laststr = SubString(text, last)
+    laststr = SubString(text, token_first)
     isempty(laststr) || push!(out, laststr)
     return out
 end
@@ -82,12 +90,12 @@ prefix(::Diff{Words}, ::Symbol) = ""
 
 function showdiff(io::IO, diff::Diff)
     for (color, text) in diff.diff
-        print_with_color(color, io, prefix(diff, color), text)
+        printstyled(io, prefix(diff, color), text, color=color)
     end
 end
 
 function Base.show(io::IO, diff::Diff)
-    print_with_color(:normal, io) # Reset colors.
+    printstyled(io, color=:normal) # Reset colors.
     showdiff(io, diff)
 end
 

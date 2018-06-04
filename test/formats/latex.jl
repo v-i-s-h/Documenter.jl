@@ -1,11 +1,12 @@
 module LaTeXFormatTests
 
-using Test
+using Compat.Test
+using Compat: @info
 
 using Documenter
 
 # Documenter package docs
-info("Building Documenter's docs with LaTeX.")
+@info("Building Documenter's docs with LaTeX.")
 const Documenter_root = normpath(joinpath(dirname(@__FILE__), "..", "..", "docs"))
 doc = makedocs(
     debug = true,
@@ -24,7 +25,6 @@ doc = makedocs(
             "man/doctests.md",
             "man/hosting.md",
             "man/latex.md",
-            "man/internals.md",
             "man/contributing.md",
         ],
         "Library" => Any[
@@ -44,7 +44,6 @@ doc = makedocs(
                 "lib/internals/mdflatten.md",
                 "lib/internals/selectors.md",
                 "lib/internals/utilities.md",
-                "lib/internals/walkers.md",
                 "lib/internals/writers.md",
             ]
         ]

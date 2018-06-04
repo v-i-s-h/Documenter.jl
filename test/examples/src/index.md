@@ -68,12 +68,6 @@ bar
 baz
 ```
 
-```jldoctest
-julia> info("...")
-INFO: ...
-
-```
-
   * `one` two three
   * four `five` six
 
@@ -139,6 +133,24 @@ foobuu
 ```
 
 ```@meta
+DocTestFilters = [r"foo[a-z]+", r"[0-9]+"]
+```
+
+```jldoctest
+julia> print("foobar123")
+foobuu456
+```
+
+```@meta
+DocTestFilters = r"foo[a-z]+"
+```
+
+```jldoctest
+julia> print("foobar")
+foobuu
+```
+
+```@meta
 DocTestFilters = []
 ```
 
@@ -167,6 +179,64 @@ Stacktrace:
 DocTestFilters = []
 ```
 
+# Doctest keyword arguments
+
+```jldoctest; setup = :(f(x) = x^2; g(x) = x)
+julia> f(2)
+4
+
+julia> g(2)
+2
+```
+```jldoctest
+julia> f(2)
+ERROR: UndefVarError: f not defined
+```
+
+```jldoctest PR650; setup = :(f(x) = x^2; g(x) = x)
+julia> f(2)
+4
+
+julia> g(2)
+2
+```
+```jldoctest PR650
+julia> f(2)
+4
+
+julia> g(2)
+2
+```
+
+```jldoctest; filter = [r"foo[a-z]+"]
+julia> print("foobar")
+foobuu
+```
+
+```jldoctest; filter = [r"foo[a-z]+", r"[0-9]+"]
+julia> print("foobar123")
+foobuu456
+```
+
+```jldoctest; filter = r"foo[a-z]+"
+julia> print("foobar")
+foobuu
+```
+
+```jldoctest; filter = r"foo[a-z]+", setup = :(f() = print("foobar"))
+julia> f()
+foobuu
+```
+
+```jldoctest; output = false
+foo(a, b) = a * b
+foo(2, 3)
+
+# output
+
+5
+```
+
 
 # Sanitise module names
 
@@ -179,8 +249,8 @@ T()
 julia> fullname(current_module())
 ()
 
-julia> fullname(Base.Pkg)
-(:Base, :Pkg)
+julia> fullname(Base.Broadcast)
+(:Base, :Broadcast)
 
 julia> current_module()
 Main
@@ -220,6 +290,28 @@ abcd
 
 ```@meta
 DocTestSetup = nothing
+```
+
+# Issue653
+
+```jldoctest
+julia> struct MyException <: Exception
+           msg::AbstractString
+       end
+
+julia> function Base.showerror(io::IO, err::MyException)
+           print(io, "MyException: ")
+           print(io, err.msg)
+       end
+
+julia> err = MyException("test exception")
+MyException("test exception")
+
+julia> sprint(showerror, err)
+"MyException: test exception"
+
+julia> throw(MyException("test exception"))
+ERROR: MyException: test exception
 ```
 
 # Issue418
@@ -309,6 +401,12 @@ Possible fix, define
 ```jldoc
 julia> x->x # ignore error on 0.7
 #1 (generic function with 1 method)
+```
+
+# Assigning symbols example
+
+```@example
+r = :a
 ```
 
 # Bad links (Windows)

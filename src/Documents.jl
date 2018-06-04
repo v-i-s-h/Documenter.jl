@@ -12,9 +12,12 @@ module Documents
 import ..Documenter:
     Anchors,
     Formats,
-    Utilities
+    Utilities,
+    IdDict
 
 using Compat, DocStringExtensions
+import Compat.Markdown
+using Compat.Unicode
 
 # Pages.
 # ------
@@ -44,12 +47,12 @@ struct Page
     element does not need expanding or some other object, such as a `DocsNode` in the case
     of `@docs` code blocks.
     """
-    mapping  :: ObjectIdDict
+    mapping  :: IdDict
     globals  :: Globals
 end
 function Page(source::AbstractString, build::AbstractString)
-    elements = Base.Markdown.parse(read(source, String)).content
-    Page(source, build, elements, ObjectIdDict(), Globals())
+    elements = Markdown.parse(read(source, String)).content
+    Page(source, build, elements, IdDict(), Globals())
 end
 
 # Document Nodes.
@@ -122,7 +125,7 @@ struct DocsNodes
 end
 
 struct EvalNode
-    code   :: Base.Markdown.Code
+    code   :: Markdown.Code
     result :: Any
 end
 
@@ -147,17 +150,17 @@ mutable struct NavNode
     `nothing` if the `NavNode` is a non-page node of the navigation tree, otherwise
     the string should be a valid key in `doc.internal.pages`
     """
-    page           :: Union{String, Void}
+    page           :: Union{String, Nothing}
     """
     If not `nothing`, specifies the text that should be displayed in navigation
     links etc. instead of the automatically determined text.
     """
-    title_override :: Union{String, Void}
-    parent         :: Union{NavNode, Void}
+    title_override :: Union{String, Nothing}
+    parent         :: Union{NavNode, Nothing}
     children       :: Vector{NavNode}
     visible        :: Bool
-    prev           :: Union{NavNode, Void}
-    next           :: Union{NavNode, Void}
+    prev           :: Union{NavNode, Nothing}
+    next           :: Union{NavNode, Nothing}
 end
 NavNode(page, title_override, parent) = NavNode(page, title_override, parent, [], true, nothing, nothing)
 
@@ -182,7 +185,7 @@ struct User
     build   :: String  # Parent directory is also `.root`. Where files are written to.
     format  :: Vector{Symbol} # What format to render the final document with?
     clean   :: Bool           # Empty the `build` directory before starting a new build?
-    doctest :: Bool           # Run doctests?
+    doctest :: Union{Bool,Symbol} # Run doctests?
     linkcheck::Bool           # Check external links..
     linkcheck_ignore::Vector{Union{String,Regex}}  # ..and then ignore (some of) them.
     checkdocs::Symbol         # Check objects missing from `@docs` blocks. `:none`, `:exports`, or `:all`.
@@ -198,7 +201,8 @@ struct User
     version :: String # version string used in the version selector by default
     html_prettyurls :: Bool # Use pretty URLs in the HTML build?
     html_disable_git :: Bool # Don't call git when exporting HTML
-    html_edit_branch :: Union{String, Void} # Change how the "Edit on GitHub" links are handled
+    html_edit_branch :: Union{String, Nothing} # Change how the "Edit on GitHub" links are handled
+    html_canonical   :: Union{String, Nothing} # Set a canonical url, if desired (https://en.wikipedia.org/wiki/Canonical_link_element)
 end
 
 """
@@ -212,11 +216,11 @@ struct Internal
     navlist :: Vector{NavNode}           # An ordered list of `NavNode`s that point to actual pages
     headers :: Anchors.AnchorMap         # See `modules/Anchors.jl`. Tracks `Markdown.Header` objects.
     docs    :: Anchors.AnchorMap         # See `modules/Anchors.jl`. Tracks `@docs` docstrings.
-    bindings:: ObjectIdDict              # Tracks insertion order of object per-binding.
-    objects :: ObjectIdDict              # Tracks which `Utilities.Objects` are included in the `Document`.
+    bindings:: IdDict                    # Tracks insertion order of object per-binding.
+    objects :: IdDict                    # Tracks which `Utilities.Objects` are included in the `Document`.
     contentsnodes :: Vector{ContentsNode}
     indexnodes    :: Vector{IndexNode}
-    locallinks :: Dict{Base.Markdown.Link, String}
+    locallinks :: Dict{Markdown.Link, String}
     errors::Set{Symbol}
 end
 
@@ -237,7 +241,7 @@ function Document(;
         build    :: AbstractString   = "build",
         format   :: Any              = :markdown,
         clean    :: Bool             = true,
-        doctest  :: Bool             = true,
+        doctest  :: Union{Bool,Symbol} = true,
         linkcheck:: Bool             = false,
         linkcheck_ignore :: Vector   = [],
         checkdocs::Symbol            = :all,
@@ -253,7 +257,8 @@ function Document(;
         version :: AbstractString    = "",
         html_prettyurls  :: Bool     = false,
         html_disable_git :: Bool     = false,
-        html_edit_branch :: Union{String, Void} = "master",
+        html_edit_branch :: Union{String, Nothing} = "master",
+        html_canonical   :: Union{String, Nothing} = nothing,
         others...
     )
     Utilities.check_kwargs(others)
@@ -288,6 +293,7 @@ function Document(;
         html_prettyurls,
         html_disable_git,
         html_edit_branch,
+        html_canonical,
     )
     internal = Internal(
         Utilities.assetsdir(),
@@ -297,11 +303,11 @@ function Document(;
         [],
         Anchors.AnchorMap(),
         Anchors.AnchorMap(),
-        ObjectIdDict(),
-        ObjectIdDict(),
+        IdDict(),
+        IdDict(),
         [],
         [],
-        Dict{Base.Markdown.Link, String}(),
+        Dict{Markdown.Link, String}(),
         Set{Symbol}(),
     )
     Document(user, internal)
@@ -380,6 +386,31 @@ function populate!(contents::ContentsNode, document::Document)
     return contents
 end
 
+# some replacements for jldoctest blocks
+function doctest_replace!(doc::Documents.Document)
+    for (src, page) in doc.internal.pages
+        empty!(page.globals.meta)
+        for element in page.elements
+            page.globals.meta[:CurrentFile] = page.source
+            walk(page.globals.meta, page.mapping[element]) do block
+                doctest_replace!(block)
+            end
+        end
+    end
+end
+function doctest_replace!(block::Markdown.Code)
+    startswith(block.language, "jldoctest") || return false
+    # suppress output for `#output`-style doctests with `output=false` kwarg
+    if occursin(r"^# output$"m, block.code) && occursin(r";.*output\h*=\h*false", block.language)
+        input = first(split(block.code, "# output\n", limit = 2))
+        block.code = rstrip(input)
+    end
+    # correct the language field
+    block.language = occursin(r"^julia> "m, block.code) ? "julia-repl" : "julia"
+    return false
+end
+doctest_replace!(block) = true
+
 ## Utilities.
 
 function buildnode(T::Type, block, doc, page)
@@ -388,7 +419,7 @@ function buildnode(T::Type, block, doc, page)
     for (ex, str) in Utilities.parseblock(block.code, doc, page)
         if Utilities.isassign(ex)
             cd(dirname(page.source)) do
-                dict[ex.args[1]] = eval(mod, ex.args[2])
+                dict[ex.args[1]] = Core.eval(mod, ex.args[2])
             end
         end
     end
@@ -402,5 +433,58 @@ end
 _compare(a, b)  = a < b ? -1 : a == b ? 0 : 1
 _isvalid(x, xs) = isempty(xs) || x in xs
 precedence(vec) = Dict(zip(vec, 1:length(vec)))
+
+##############################################
+# walk (previously in the Walkers submodule) #
+##############################################
+"""
+$(SIGNATURES)
+
+Calls `f` on `element` and any of its child elements. `meta` is a `Dict` containing metadata
+such as current module.
+"""
+walk(f, meta, element) = (f(element); nothing)
+
+# Change to the docstring's defining module if it has one. Change back afterwards.
+function walk(f, meta, block::Markdown.MD)
+    tmp = get(meta, :CurrentModule, nothing)
+    mod = get(block.meta, :module, nothing)
+    mod ≡ nothing || (meta[:CurrentModule] = mod)
+    f(block) && walk(f, meta, block.content)
+    tmp ≡ nothing ? delete!(meta, :CurrentModule) : (meta[:CurrentModule] = tmp)
+    nothing
+end
+
+function walk(f, meta, block::Vector)
+    for each in block
+        walk(f, meta, each)
+    end
+end
+
+const MDContentElements = Union{
+    Markdown.BlockQuote,
+    Markdown.Paragraph,
+    Markdown.MD,
+}
+walk(f, meta, block::MDContentElements) = f(block) ? walk(f, meta, block.content) : nothing
+
+const MDTextElements = Union{
+    Markdown.Bold,
+    Markdown.Header,
+    Markdown.Italic,
+}
+walk(f, meta, block::MDTextElements)      = f(block) ? walk(f, meta, block.text)    : nothing
+walk(f, meta, block::Markdown.Footnote)   = f(block) ? walk(f, meta, block.text)    : nothing
+walk(f, meta, block::Markdown.Admonition) = f(block) ? walk(f, meta, block.content) : nothing
+walk(f, meta, block::Markdown.Image)      = f(block) ? walk(f, meta, block.alt)     : nothing
+walk(f, meta, block::Markdown.Table)      = f(block) ? walk(f, meta, block.rows)    : nothing
+walk(f, meta, block::Markdown.List)       = f(block) ? walk(f, meta, block.items)   : nothing
+walk(f, meta, block::Markdown.Link)       = f(block) ? walk(f, meta, block.text)    : nothing
+walk(f, meta, block::RawHTML) = nothing
+walk(f, meta, block::DocsNodes) = walk(f, meta, block.nodes)
+walk(f, meta, block::DocsNode)  = walk(f, meta, block.docstr)
+walk(f, meta, block::EvalNode)  = walk(f, meta, block.result)
+walk(f, meta, block::MetaNode)  = (merge!(meta, block.dict); nothing)
+walk(f, meta, block::Anchors.Anchor) = walk(f, meta, block.object)
 
 end

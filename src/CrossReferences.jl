@@ -10,10 +10,10 @@ import ..Documenter:
     Expanders,
     Formats,
     Documenter,
-    Utilities,
-    Walkers
+    Utilities
 
 using Compat, DocStringExtensions
+import Compat.Markdown
 
 """
 $(SIGNATURES)
@@ -31,7 +31,7 @@ function crossref(doc::Documents.Document)
 end
 
 function crossref(elem, page, doc)
-    Walkers.walk(page.globals.meta, elem) do link
+    Documents.walk(page.globals.meta, elem) do link
         xref(link, page.globals.meta, page, doc)
     end
 end
@@ -42,19 +42,19 @@ end
 const NAMED_XREF = r"^@ref (.+)$"
 
 function xref(link::Markdown.Link, meta, page, doc)
-    link.url == "@ref"            ? basicxref(link, meta, page, doc) :
-    ismatch(NAMED_XREF, link.url) ? namedxref(link, meta, page, doc) : nothing
+    link.url == "@ref"             ? basicxref(link, meta, page, doc) :
+    occursin(NAMED_XREF, link.url) ? namedxref(link, meta, page, doc) : nothing
     return false # Stop `walk`ing down this `link` element.
 end
 xref(other, meta, page, doc) = true # Continue to `walk` through element `other`.
 
 function basicxref(link::Markdown.Link, meta, page, doc)
-    if length(link.text) === 1 && isa(link.text[1], Base.Markdown.Code)
+    if length(link.text) === 1 && isa(link.text[1], Markdown.Code)
         docsxref(link, link.text[1].code, meta, page, doc)
     elseif isa(link.text, Vector)
         # No `name` was provided, since given a `@ref`, so slugify the `.text` instead.
         text = strip(sprint(Markdown.plain, Markdown.Paragraph(link.text)))
-        if ismatch(r"#[0-9]+", text)
+        if occursin(r"#[0-9]+", text)
             issue_xref(link, lstrip(text, '#'), meta, page, doc)
         else
             name = Utilities.slugify(text)
@@ -76,7 +76,7 @@ function namedxref(link::Markdown.Link, meta, page, doc)
     else
         if Anchors.exists(doc.internal.headers, slug)
             namedxref(link, slug, meta, page, doc)
-        elseif length(link.text) === 1 && isa(link.text[1], Base.Markdown.Code)
+        elseif length(link.text) === 1 && isa(link.text[1], Markdown.Code)
             docsxref(link, slug, meta, page, doc)
         else
             namedxref(link, slug, meta, page, doc)
@@ -119,9 +119,9 @@ function docsxref(link::Markdown.Link, code, meta, page, doc)
         ex = QuoteNode(keyword)
     else
         try
-            ex = parse(code)
+            ex = Meta.parse(code)
         catch err
-            !isa(err, ParseError) && rethrow(err)
+            !isa(err, Meta.ParseError) && rethrow(err)
             push!(doc.internal.errors, :cross_references)
             Utilities.warn(page.source, "Unable to parse the reference '[`$code`](@ref)'.")
             return
@@ -141,7 +141,7 @@ function docsxref(link::Markdown.Link, code, meta, page, doc)
 
     local typesig
     try
-        typesig = eval(mod, Documenter.DocSystem.signature(ex, rstrip(code)))
+        typesig = Core.eval(mod, Documenter.DocSystem.signature(ex, rstrip(code)))
     catch err
         push!(doc.internal.errors, :cross_references)
         Utilities.warn(page.source, "Unable to evaluate the type signature for '[`$code`](@ref)'.", err, ex, mod)
@@ -203,7 +203,7 @@ function find_object(binding, typesig)
     end
 end
 function find_object(λ::Union{Function, DataType}, binding, typesig)
-    if _method_exists(λ, typesig)
+    if hasmethod(λ, typesig)
         signature = getsig(λ, typesig)
         return Utilities.Object(binding, signature)
     else
@@ -212,8 +212,6 @@ function find_object(λ::Union{Function, DataType}, binding, typesig)
 end
 find_object(::Union{Function, DataType}, binding, ::Union{Union,Type{Union{}}}) = Utilities.Object(binding, Union{})
 find_object(other, binding, typesig) = Utilities.Object(binding, typesig)
-
-_method_exists(f, t) = method_exists(f, t)
 
 getsig(λ::Union{Function, DataType}, typesig) = Base.tuple_type_tail(which(λ, typesig).sig)
 

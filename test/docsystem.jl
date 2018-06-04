@@ -1,6 +1,6 @@
 module DocSystemTests
 
-using Test
+using Compat.Test
 using Compat
 
 import Documenter: Documenter, DocSystem
@@ -38,11 +38,11 @@ PACKAGES_LOADED_MAIN = VERSION < v"0.7.0-DEV.1877"
 
     ## `MultiDoc` object.
     @test isdefined(DocSystem, :MultiDoc)
-    @test fieldnames(DocSystem.MultiDoc) == [:order, :docs]
+    @test (fieldnames(DocSystem.MultiDoc)...,) == (:order, :docs)
 
     ## `DocStr` object.
     @test isdefined(DocSystem, :DocStr)
-    @test fieldnames(DocSystem.DocStr) == [:text, :object, :data]
+    @test (fieldnames(DocSystem.DocStr)...,) == (:text, :object, :data)
     ## `getdocs`.
     let b   = DocSystem.binding(DocSystem, :getdocs),
         d_0 = DocSystem.getdocs(b, Tuple{}),
@@ -75,7 +75,7 @@ PACKAGES_LOADED_MAIN = VERSION < v"0.7.0-DEV.1877"
     end
 
     ## `UnionAll`
-    let b = DocSystem.binding(@__MODULE__, parse("f(x::T) where T"))
+    let b = DocSystem.binding(@__MODULE__, Meta.parse("f(x::T) where T"))
         @test b.var == :f
     end
 end

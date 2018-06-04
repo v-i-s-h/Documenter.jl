@@ -205,7 +205,18 @@ Use [`for i = 1:10 ...`](@ref for) to loop over all the numbers from 1 to 10.
 ## `@meta` block
 
 This block type is used to define metadata key/value pairs that can be used elsewhere in the
-page. Currently `CurrentModule`, `DocTestSetup` and `DocTestFilters` are the only recognised keys.
+page. Currently recognised keys:
+- `CurrentModule`: module where Documenter evaluates, for example, [`@docs`-block](@ref)
+  and [`@ref`-link](@ref)s.
+- `DocTestSetup`: code to be evaluated before a doctest, see the [Setup Code](@ref)
+  section under [Doctests](@ref).
+- `DocTestFilters`: filters to deal with, for example, unpredictable output from doctests,
+  see the [Filtering Doctests](@ref) section under [Doctests](@ref).
+- `EditURL`: link to where the page can be edited. This defaults to the `.md` page itself,
+  but if the source is something else (for example if the `.md` page is generated as part of
+  the doc build) this can be set, either as a local link, or an absolute url.
+
+Example:
 
 ````markdown
 ```@meta
@@ -214,12 +225,11 @@ DocTestSetup  = quote
     using MyPackage
 end
 DocTestFilters = [r"Stacktrace:[\s\S]+"]
+EditURL = "link/to/source/file"
 ```
 ````
 
 Note that `@meta` blocks are always evaluated in `Main`.
-
-See [Setup Code](@ref) section of the Doctests page for an explanation of `DocTestSetup`.
 
 ## `@index` block
 
@@ -307,6 +317,7 @@ Code blocks may have some content that does not need to be displayed in the fina
 
 ````markdown
 ```@example
+using Compat.Random # hide
 srand(1) # hide
 A = rand(3, 3)
 b = [1, 2, 3]
@@ -318,7 +329,7 @@ Note that appending `# hide` to every line in an `@example` block will result in
 being hidden in the rendered document. The results block will still be rendered though.
 `@setup` blocks are a convenient shorthand for hiding an entire block, including the output.
 
-**`STDOUT` and `STDERR`**
+**`stdout` and `stderr`**
 
 The Julia output streams are redirected to the results block when evaluating `@example`
 blocks in the same way as when running doctest code blocks.
@@ -327,7 +338,7 @@ blocks in the same way as when running doctest code blocks.
 
 When the `@example` block evaluates to `nothing` then the second block is not displayed.
 Only the source code block will be shown in the rendered document. Note that if any output
-from either `STDOUT` or `STDERR` is captured then the results block will be displayed even
+from either `stdout` or `stderr` is captured then the results block will be displayed even
 if `nothing` is returned.
 
 **Named `@example` Blocks**
@@ -399,6 +410,29 @@ draw(SVG("plot.svg", 6inch, 4inch), ans); nothing # hide
 
 ![](plot.svg)
 ````
+
+**Delayed Execution of `@example` Blocks**
+
+`@example` blocks accept a keyword argument `continued` which can be set to `true` or `false`
+(defaults to `false`). When `continued = true` the execution of the code is delayed until the
+next `continued = false` `@example`-block. This is needed for example when the expression in
+a block is not complete. Example:
+
+````markdown
+```@example half-loop; continued = true
+for i in 1:3
+    j = i^2
+```
+Some text explaining what we should do with `j`
+```@example half-loop
+    println(j)
+end
+```
+````
+
+Here the first block is not complete -- the loop is missing the `end`. Thus, by setting
+`continued = true` here we delay the evaluation of the first block, until we reach the
+second block. A block with `continued = true` does not have any output.
 
 ## `@repl` block
 
@@ -491,3 +525,35 @@ filename is not known until evaluation of the block itself.
     In most cases `@example` is preferred over `@eval`. Just like in normal Julia code where
     `eval` should be only be considered as a last resort, `@eval` should be treated in the
     same way.
+
+
+## `@raw <format>` block
+
+Allows code to be inserted into the final document verbatim. E.g. to insert custom HTML or
+LaTeX code into the output.
+
+The `format` argument is mandatory and Documenter uses it to determine whether a particular
+block should be copied over to the output or not. Currently supported formats are `html`
+and `latex`, used by the respective writers. A `@raw` block whose `format` is not
+recognized is usually ignored, so it is possible to have a raw block for each output format
+without the blocks being duplicated in the output.
+
+The following example shows how SVG code with custom styling can be included into documents
+using the `@raw` block.
+
+````markdown
+```@raw html
+<svg style="display: block; margin: 0 auto;" width="5em" heigth="5em">
+	<circle cx="2.5em" cy="2.5em" r="2em" stroke="black" stroke-width=".1em" fill="red" />
+</svg>
+```
+````
+
+It will show up as follows, with code having been copied over verbatim to the HTML file.
+
+```@raw html
+<svg style="display: block; margin: 0 auto;" width="5em" heigth="5em">
+	<circle cx="2.5em" cy="2.5em" r="2em" stroke="black" stroke-width=".1em" fill="red" />
+    (SVG)
+</svg>
+```

@@ -11,7 +11,9 @@ export mdflatten
 
 import ..Utilities
 
-import Base.Markdown:
+using Compat
+
+import Compat.Markdown:
     MD, BlockQuote, Bold, Code, Header, HorizontalRule,
     Image, Italic, LaTeX, LineBreak, Link, List, Paragraph, Table,
     Footnote, Admonition
@@ -26,7 +28,7 @@ then be used as input for search engines.
 function mdflatten(md)
     io = IOBuffer()
     mdflatten(io, md)
-    Utilities.takebuf_str(io)
+    String(take!(io))
 end
 
 mdflatten(io, md) = mdflatten(io, md, md)
@@ -70,7 +72,7 @@ mdflatten(io, link::Link, parent) = mdflatten(io, link.text, link)
 mdflatten(io, b::Bold, parent) = mdflatten(io, b.text, b)
 mdflatten(io, i::Italic, parent) = mdflatten(io, i.text, i)
 mdflatten(io, i::Image, parent) = print(io, "(Image: $(i.alt))")
-mdflatten(io, m::LaTeX, parent) = print(io, replace(m.formula, r"[^()+\-*^=\w\s]", ""))
+mdflatten(io, m::LaTeX, parent) = print(io, replace(m.formula, r"[^()+\-*^=\w\s]" => ""))
 mdflatten(io, ::LineBreak, parent) = print(io, '\n')
 
 # Is both inline and block
@@ -80,7 +82,7 @@ mdflatten(io, c::Code, parent) = print(io, c.code)
 mdflatten(io, expr::Union{Symbol,Expr}, parent) = print(io, expr)
 
 mdflatten(io, f::Footnote, parent) = footnote(io, f.id, f.text, f)
-footnote(io, id, text::Void, parent) = print(io, "[$id]")
+footnote(io, id, text::Nothing, parent) = print(io, "[$id]")
 function footnote(io, id, text, parent)
     print(io, "[$id]: ")
     mdflatten(io, text, parent)

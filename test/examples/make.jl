@@ -1,4 +1,5 @@
 using Compat
+using Compat: @info
 
 # Defines the modules referred to in the example docs (under src/) and then builds them.
 # It can be called separately to build the examples/, or as part of the test suite.
@@ -86,7 +87,7 @@ using Documenter
 
 const examples_root = dirname(@__FILE__)
 
-info("Building mock package docs: MarkdownWriter")
+@info("Building mock package docs: MarkdownWriter")
 examples_markdown_doc = makedocs(
     debug = true,
     root  = examples_root,
@@ -94,7 +95,25 @@ examples_markdown_doc = makedocs(
     doctest = false,
 )
 
-info("Building mock package docs: HTMLWriter")
+
+htmlbuild_pages = Any[
+    "**Home**" => "index.md",
+    "Manual" => [
+        "man/tutorial.md",
+    ],
+    hide("hidden.md"),
+    "Library" => [
+        "lib/functions.md",
+        "lib/autodocs.md",
+    ],
+    hide("Hidden Pages" => "hidden/index.md", Any[
+        "Page X" => "hidden/x.md",
+        "hidden/y.md",
+        "hidden/z.md",
+    ])
+]
+
+@info("Building mock package docs: HTMLWriter")
 examples_html_doc = makedocs(
     debug = true,
     root  = examples_root,
@@ -103,22 +122,7 @@ examples_html_doc = makedocs(
     doctestfilters = [r"Ptr{0x[0-9]+}"],
     assets = ["assets/custom.css"],
     sitename = "Documenter example",
-    pages    = Any[
-        "Home" => "index.md",
-        "Manual" => [
-            "man/tutorial.md",
-        ],
-        hide("hidden.md"),
-        "Library" => [
-            "lib/functions.md",
-            "lib/autodocs.md",
-        ],
-        hide("Hidden Pages" => "hidden/index.md", Any[
-            "Page X" => "hidden/x.md",
-            "hidden/y.md",
-            "hidden/z.md",
-        ])
-    ],
+    pages = htmlbuild_pages,
 
     linkcheck = true,
     linkcheck_ignore = [r"(x|y).md", "z.md", r":func:.*"],
@@ -126,34 +130,20 @@ examples_html_doc = makedocs(
     html_edit_branch = nothing,
 )
 
-info("Building mock package docs: HTMLWriter with pretty URLs")
+@info("Building mock package docs: HTMLWriter with pretty URLs and canonical links")
 examples_html_doc = makedocs(
     debug = true,
     root  = examples_root,
     build = "builds/html-pretty-urls",
     format   = :html,
     html_prettyurls = true,
+    html_canonical = "https://example.com/stable",
     doctestfilters = [r"Ptr{0x[0-9]+}"],
     assets = [
         "assets/favicon.ico",
         "assets/custom.css"
     ],
     sitename = "Documenter example",
-    pages    = Any[
-        "Home" => "index.md",
-        "Manual" => [
-            "man/tutorial.md",
-        ],
-        hide("hidden.md"),
-        "Library" => [
-            "lib/functions.md",
-            "lib/autodocs.md",
-        ],
-        hide("Hidden Pages" => "hidden/index.md", Any[
-            "Page X" => "hidden/x.md",
-            "hidden/y.md",
-            "hidden/z.md",
-        ])
-    ],
+    pages = htmlbuild_pages,
     doctest = false,
 )

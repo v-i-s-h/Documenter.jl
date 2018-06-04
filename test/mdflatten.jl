@@ -1,8 +1,8 @@
 module MDFlattenTests
 
-using Test
+using Compat.Test
 
-using Base.Markdown
+import Compat.Markdown
 using Documenter.Utilities.MDFlatten
 
 @testset "MDFlatten" begin
@@ -47,11 +47,9 @@ using Documenter.Utilities.MDFlatten
 
     # Math
     @test mdflatten(Markdown.parse("\$e=mc^2\$")) == "e=mc^2\n\n"
-    if VERSION > v"0.5-"
-        # backticks and blocks for math only in 0.5, i.e. these fail on 0.4
-        @test mdflatten(Markdown.parse("``e=mc^2``")) == "e=mc^2\n\n"
-        @test mdflatten(Markdown.parse("```math\n\\(m+n)(m-n)\nx=3\\sin(x)\n```")) == "(m+n)(m-n)\nx=3sin(x)\n\n"
-    end
+    # backticks and blocks for math only in 0.5, i.e. these fail on 0.4
+    @test mdflatten(Markdown.parse("``e=mc^2``")) == "e=mc^2\n\n"
+    @test mdflatten(Markdown.parse("```math\n\\(m+n)(m-n)\nx=3\\sin(x)\n```")) == "(m+n)(m-n)\nx=3sin(x)\n\n"
 
     # symbols in markdown
     @test mdflatten(Markdown.parse("A \$B C")) == "A B C\n\n"

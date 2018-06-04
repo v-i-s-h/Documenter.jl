@@ -52,6 +52,16 @@ struct T end
 t = T()
 ```
 
+```@example hide-all-the-things
+a = 1#hide
+b = 2# hide
+c = 3#  hide
+d = 4 #hide
+e = 5 # hide
+f = 6 #  hide
+a + b + c + d + e + f
+```
+
 ## Foo
 
 ```@example 3
@@ -83,6 +93,25 @@ f(1), g(1)
 @which T()
 ```
 
+```@example continued-code
+A = 1
+```
+```@example continued-code; continued = true
+for i in 1:3
+```
+```@example
+A = 2
+```
+```@example continued-code; continued = true
+    println(A + i)
+```
+```@example continued-code
+end
+```
+```@example continued-code
+A + 1
+```
+
 #### Foo
 
 ```@example
@@ -92,6 +121,7 @@ b = ans
 ```
 
 ```@repl
+using Compat.Random # hide
 srand(1); # hide
 nothing
 rand()

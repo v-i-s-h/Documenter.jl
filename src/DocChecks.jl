@@ -4,14 +4,16 @@ Provides two functions, [`missingdocs`](@ref) and [`doctest`](@ref), for checkin
 module DocChecks
 
 import ..Documenter:
+    Documenter,
     Builder,
     Documents,
     Expanders,
     Documenter,
     Utilities,
-    Walkers
+    IdDict
 
 using Compat, DocStringExtensions
+import Compat.Markdown
 
 # Missing docstrings.
 # -------------------
@@ -48,7 +50,7 @@ function missingdocs(doc::Documents.Document)
             end
         end
         push!(doc.internal.errors, :missing_docs)
-        Utilities.warn(Utilities.takebuf_str(b))
+        Utilities.warn(String(take!(b)))
     end
 end
 
@@ -62,7 +64,7 @@ end
 
 function allbindings(checkdocs::Symbol, mod::Module, out = Dict{Utilities.Binding, Set{Type}}())
     for (obj, doc) in meta(mod)
-        isa(obj, ObjectIdDict) && continue
+        isa(obj, IdDict) && continue
         name = nameof(obj)
         isexported = Base.isexported(mod, name)
         if checkdocs === :all || (isexported && checkdocs === :exports)
@@ -77,13 +79,32 @@ meta(m) = Docs.meta(m)
 nameof(x::Function)          = typeof(x).name.mt.name
 nameof(b::Base.Docs.Binding) = b.var
 nameof(x::DataType)          = x.name.name
-nameof(m::Module)            = module_name(m)
+nameof(m::Module)            = Compat.nameof(m)
 
 sigs(x::Base.Docs.MultiDoc) = x.order
 sigs(::Any) = Type[Union{}]
 
 # Julia code block testing.
 # -------------------------
+
+# escape characters that has a meaning in regex
+regex_escape(str) = sprint(escape_string, str, "\\^\$.|?*+()[{")
+
+# helper to display linerange for error printing
+function find_codeblock_in_file(code, file)
+    content = read(Base.find_source_file(file), String)
+    content = replace(content, "\r\n" => "\n")
+    # make a regex of the code that matches leading whitespace
+    rcode = "\\h*" * replace(regex_escape(code), "\\n" => "\\n\\h*")
+    blockidx = Compat.findfirst(Regex(rcode), content)
+    if blockidx !== nothing
+        startline = countlines(IOBuffer(content[1:prevind(content, first(blockidx))]))
+        endline = startline + countlines(IOBuffer(code)) + 1 # +1 to include the closing ```
+        return ":$(startline)-$(endline)"
+    else
+        return ""
+    end
+end
 
 """
 $(SIGNATURES)
@@ -93,13 +114,13 @@ the document generation when an error is thrown. Use `doctest = false` keyword i
 [`Documenter.makedocs`](@ref) to disable doctesting.
 """
 function doctest(doc::Documents.Document)
-    if doc.user.doctest
+    if doc.user.doctest === :fix || doc.user.doctest
         println(" > running doctests.")
         for (src, page) in doc.internal.pages
             empty!(page.globals.meta)
             for element in page.elements
                 page.globals.meta[:CurrentFile] = page.source
-                Walkers.walk(page.globals.meta, page.mapping[element]) do block
+                Documents.walk(page.globals.meta, page.mapping[element]) do block
                     doctest(block, page.globals.meta, doc, page)
                 end
             end
@@ -110,47 +131,76 @@ function doctest(doc::Documents.Document)
 end
 
 function __ans__!(m::Module, value)
-    isdefined(m, :__ans__!) || eval(m, :(__ans__!(value) = global ans = value))
-    return eval(m, Expr(:call, () -> m.__ans__!(value)))
+    isdefined(m, :__ans__!) || Core.eval(m, :(__ans__!(value) = global ans = value))
+    return Core.eval(m, Expr(:call, () -> m.__ans__!(value)))
 end
 
 function doctest(block::Markdown.Code, meta::Dict, doc::Documents.Document, page)
-    m = match(r"jldoctest[ ]?(.*)$", block.language)
-    if m !== nothing
+    lang = block.language
+    if startswith(lang, "jldoctest")
         # Define new module or reuse an old one from this page if we have a named doctest.
-        name = m[1]
+        name = match(r"jldoctest[ ]?(.*)$", split(lang, ';', limit = 2)[1])[1]
         sym = isempty(name) ? gensym("doctest-") : Symbol("doctest-", name)
         sandbox = get!(page.globals.meta, sym) do
             newmod = Module(sym)
-            eval(newmod, :(eval(x) = Core.eval($newmod, x)))
-            eval(newmod, :(eval(m, x) = Core.eval(m, x)))
+            # eval(expr) is available in the REPL (i.e. Main) so we emulate that for the sandbox
+            Core.eval(newmod, :(eval(x) = Core.eval($newmod, x)))
             newmod
         end
+
         # Normalise line endings.
-        code = replace(block.code, "\r\n", "\n")
-        if haskey(meta, :DocTestSetup)
-            expr = meta[:DocTestSetup]
-            Meta.isexpr(expr, :block) && (expr.head = :toplevel)
-            eval(sandbox, expr)
+        block.code = replace(block.code, "\r\n" => "\n")
+
+        # parse keyword arguments to doctest
+        d = Dict()
+        idx = Compat.findfirst(c -> c == ';', lang)
+        if idx !== nothing
+            kwargs = Meta.parse("($(lang[nextind(lang, idx):end]),)")
+            for kwarg in kwargs.args
+                if !(isa(kwarg, Expr) && kwarg.head === :(=) && isa(kwarg.args[1], Symbol))
+                    file = meta[:CurrentFile]
+                    lines = find_codeblock_in_file(block.code, file)
+                    Utilities.warn(
+                        """
+                        Invalid syntax for doctest keyword arguments in $(file)$(lines)
+                        Use ```jldoctest name; key1 = value1, key2 = value2
+
+                        ```$(lang)
+                        $(block.code)
+                        ```
+                        """
+                        )
+                    return false
+                end
+                d[kwarg.args[1]] = Core.eval(sandbox, kwarg.args[2])
+            end
         end
-        if ismatch(r"^julia> "m, code)
-            eval_repl(code, sandbox, meta, doc, page)
-            block.language = "julia-repl"
-        elseif ismatch(r"^# output$"m, code)
-            eval_script(code, sandbox, meta, doc, page)
-            block.language = "julia"
+        meta[:LocalDocTestArguments] = d
+
+        for expr in [get(meta, :DocTestSetup, []); get(meta[:LocalDocTestArguments], :setup, [])]
+            Meta.isexpr(expr, :block) && (expr.head = :toplevel)
+            Core.eval(sandbox, expr)
+        end
+        if occursin(r"^julia> "m, block.code)
+            eval_repl(block, sandbox, meta, doc, page)
+        elseif occursin(r"^# output$"m, block.code)
+            eval_script(block, sandbox, meta, doc, page)
         else
             push!(doc.internal.errors, :doctest)
+            file = meta[:CurrentFile]
+            lines = find_codeblock_in_file(block.code, file)
             Utilities.warn(
                 """
-                Invalid doctest block. Requires `julia> ` or `# output` in '$(meta[:CurrentFile])'
+                Invalid doctest block in $(file)$(lines)
+                Requires `julia> ` or `# output`
 
-                ```jldoctest
-                $(code)
+                ```$(lang)
+                $(block.code)
                 ```
                 """
             )
         end
+       delete!(meta, :LocalDocTestArguments)
     end
     false
 end
@@ -164,26 +214,26 @@ end
 # Doctest evaluation.
 
 mutable struct Result
-    code   :: String # The entire code block that is being tested.
-    input  :: String # Part of `code` representing the current input.
-    output :: String # Part of `code` representing the current expected output.
+    block  :: Markdown.Code # The entire code block that is being tested.
+    input  :: String # Part of `block.code` representing the current input.
+    output :: String # Part of `block.code` representing the current expected output.
     file   :: String # File in which the doctest is written. Either `.md` or `.jl`.
     value  :: Any        # The value returned when evaluating `input`.
     hide   :: Bool       # Semi-colon suppressing the output?
-    stdout :: IOBuffer   # Redirected STDOUT/STDERR gets sent here.
+    stdout :: IOBuffer   # Redirected stdout/stderr gets sent here.
     bt     :: Vector     # Backtrace when an error is thrown.
 
-    function Result(code, input, output, file)
-        new(code, input, rstrip(output, '\n'), file, nothing, false, IOBuffer())
+    function Result(block, input, output, file)
+        new(block, input, rstrip(output, '\n'), file, nothing, false, IOBuffer())
     end
 end
 
-function eval_repl(code, sandbox, meta::Dict, doc::Documents.Document, page)
-    for (input, output) in repl_splitter(code)
-        result = Result(code, input, output, meta[:CurrentFile])
+function eval_repl(block, sandbox, meta::Dict, doc::Documents.Document, page)
+    for (input, output) in repl_splitter(block.code)
+        result = Result(block, input, output, meta[:CurrentFile])
         for (ex, str) in Utilities.parseblock(input, doc, page; keywords = false)
             # Input containing a semi-colon gets suppressed in the final output.
-            result.hide = Base.REPL.ends_with_semicolon(str)
+            result.hide = Documenter.REPL.ends_with_semicolon(str)
             (value, success, backtrace, text) = Utilities.withoutput() do
                 disable_color() do
                     Core.eval(sandbox, ex)
@@ -202,14 +252,16 @@ function eval_repl(code, sandbox, meta::Dict, doc::Documents.Document, page)
     end
 end
 
-function eval_script(code, sandbox, meta::Dict, doc::Documents.Document, page)
+function eval_script(block, sandbox, meta::Dict, doc::Documents.Document, page)
     # TODO: decide whether to keep `# output` syntax for this. It's a bit ugly.
     #       Maybe use double blank lines, i.e.
     #
     #
     #       to mark `input`/`output` separation.
-    input, output = split(code, "\n# output\n", limit = 2)
-    result = Result(code, "", output, meta[:CurrentFile])
+    input, output = split(block.code, "# output\n", limit = 2)
+    input  = rstrip(input, '\n')
+    output = lstrip(output, '\n')
+    result = Result(block, input, output, meta[:CurrentFile])
     for (ex, str) in Utilities.parseblock(input, doc, page; keywords = false)
         (value, success, backtrace, text) = Utilities.withoutput() do
             Core.eval(sandbox, ex)
@@ -226,11 +278,12 @@ end
 
 function filter_doctests(strings::NTuple{2, AbstractString},
                          doc::Documents.Document, meta::Dict)
-    local_filters = get(meta, :DocTestFilters, [])
-    local_filters == nothing && local_filters == []
-    for r in [doc.user.doctestfilters; local_filters]
-        if all(ismatch.(r, strings))
-            strings = replace.(strings, r, "")
+    meta_block_filters = get(meta, :DocTestFilters, [])
+    meta_block_filters == nothing && meta_block_filters == []
+    doctest_local_filters = get(meta[:LocalDocTestArguments], :filter, [])
+    for r in [doc.user.doctestfilters; meta_block_filters; doctest_local_filters]
+        if all(occursin.((r,), strings))
+            strings = replace.(strings, (r => "",))
         end
     end
     return strings
@@ -238,32 +291,42 @@ end
 
 # Regex used here to replace gensym'd module names could probably use improvements.
 function checkresult(sandbox::Module, result::Result, meta::Dict, doc::Documents.Document)
-    sandbox_name = module_name(sandbox)
+    sandbox_name = nameof(sandbox)
     mod_regex = Regex("(Main\\.)?(Symbol\\(\"$(sandbox_name)\"\\)|$(sandbox_name))[,.]")
     mod_regex_nodot = Regex(("(Main\\.)?$(sandbox_name)"))
     if isdefined(result, :bt) # An error was thrown and we have a backtrace.
         # To avoid dealing with path/line number issues in backtraces we use `[...]` to
         # mark ignored output from an error message. Only the text prior to it is used to
         # test for doctest success/failure.
-        head = replace(split(result.output, "\n[...]"; limit = 2)[1], mod_regex, "")
-        head = replace(head, mod_regex_nodot, "Main")
-        str  = replace(error_to_string(result.stdout, result.value, result.bt), mod_regex, "")
-        str  = replace(str, mod_regex_nodot, "Main")
+        head = replace(split(result.output, "\n[...]"; limit = 2)[1], mod_regex  => "")
+        head = replace(head, mod_regex_nodot => "Main")
+        str  = replace(error_to_string(result.stdout, result.value, result.bt), mod_regex => "")
+        str  = replace(str, mod_regex_nodot => "Main")
 
         str, head = filter_doctests((str, head), doc, meta)
         # Since checking for the prefix of an error won't catch the empty case we need
         # to check that manually with `isempty`.
         if isempty(head) || !startswith(str, head)
-            report(result, str, doc)
+            if doc.user.doctest === :fix
+                fix_doctest(result, str, doc)
+            else
+                report(result, str, doc)
+            end
         end
     else
         value = result.hide ? nothing : result.value # `;` hides output.
-        output = replace(strip(sanitise(IOBuffer(result.output))), mod_regex, "")
-        str = replace(result_to_string(result.stdout, value), mod_regex, "")
+        output = replace(rstrip(sanitise(IOBuffer(result.output))), mod_regex => "")
+        str = replace(result_to_string(result.stdout, value), mod_regex => "")
         # Replace a standalone module name with `Main`.
-        str = strip(replace(str, mod_regex_nodot, "Main"))
-        str, output = filter_doctests((str, output), doc, meta)
-        str == output || report(result, str, doc)
+        str = rstrip(replace(str, mod_regex_nodot => "Main"))
+        filteredstr, filteredoutput = filter_doctests((str, output), doc, meta)
+        if filteredstr != filteredoutput
+            if doc.user.doctest === :fix
+                fix_doctest(result, str, doc)
+            else
+                report(result, str, doc)
+            end
+        end
     end
     return nothing
 end
@@ -273,7 +336,7 @@ end
 function result_to_string(buf, value)
     dis = text_display(buf)
     value === nothing || disable_color() do
-        eval(Expr(:call, display, dis, QuoteNode(value)))
+        Core.eval(Main, Expr(:call, display, dis, QuoteNode(value)))
     end
     sanitise(buf)
 end
@@ -285,11 +348,11 @@ funcsym() = CAN_INLINE[] ? :disable_color : :eval
 function error_to_string(buf, er, bt)
     fs = funcsym()
     # Remove unimportant backtrace info.
-    index = findlast(ptr -> Base.REPL.ip_matches_func(ptr, fs), bt)
+    index = Compat.findlast(ptr -> Documenter.ip_matches_func(ptr, fs), bt)
     # Print a REPL-like error message.
     disable_color() do
         print(buf, "ERROR: ")
-        showerror(buf, er, index == 0 ? bt : bt[1:(index - 1)])
+        Base.invokelatest(showerror, buf, er, index === nothing ? bt : bt[1:(index - 1)])
     end
     sanitise(buf)
 end
@@ -300,31 +363,33 @@ function sanitise(buffer)
     for line in eachline(seekstart(buffer))
         println(out, rstrip(line))
     end
-    remove_term_colors(rstrip(Utilities.takebuf_str(out), '\n'))
+    remove_term_colors(rstrip(String(take!(out)), '\n'))
 end
 
 import .Utilities.TextDiff
 
 function report(result::Result, str, doc::Documents.Document)
-    buffer = IOBuffer()
-    println(buffer, "=====[Test Error]", "="^30)
-    println(buffer)
-    print_with_color(:cyan, buffer, "> File: ", result.file, "\n")
-    print_with_color(:cyan, buffer, "\n> Code block:\n")
-    println(buffer, "\n```jldoctest")
-    println(buffer, result.code)
-    println(buffer, "```")
+    iob = IOBuffer()
+    ioc = IOContext(iob, :color => Base.have_color)
+    println(ioc, "=====[Test Error]", "="^30)
+    println(ioc)
+    printstyled(ioc, "> Location: ", result.file, color=:cyan)
+    printstyled(ioc, find_codeblock_in_file(result.block.code, result.file), color=:cyan)
+    printstyled(ioc, "\n\n> Code block:\n", color=:cyan)
+    println(ioc, "\n```$(result.block.language)")
+    println(ioc, result.block.code)
+    println(ioc, "```")
     if !isempty(result.input)
-        print_with_color(:cyan, buffer, "\n> Subexpression:\n")
-        print_indented(buffer, result.input; indent = 4)
+        printstyled(ioc, "\n> Subexpression:\n", color=:cyan)
+        print_indented(ioc, result.input; indent = 4)
     end
     warning = Base.have_color ? "" : " (REQUIRES COLOR)"
-    print_with_color(:cyan, buffer, "\n> Output Diff", warning, ":\n\n")
+    printstyled(ioc, "\n> Output Diff", warning, ":\n\n", color=:cyan)
     diff = TextDiff.Diff{TextDiff.Words}(result.output, rstrip(str))
-    Utilities.TextDiff.showdiff(buffer, diff)
-    println(buffer, "\n\n", "=====[End Error]=", "="^30)
+    Utilities.TextDiff.showdiff(ioc, diff)
+    println(ioc, "\n\n", "=====[End Error]=", "="^30)
     push!(doc.internal.errors, :doctest)
-    print_with_color(:normal, Utilities.takebuf_str(buffer))
+    printstyled(String(take!(iob)), color=:normal)
 end
 
 function print_indented(buffer::IO, str::AbstractString; indent = 4)
@@ -334,10 +399,57 @@ function print_indented(buffer::IO, str::AbstractString; indent = 4)
     end
 end
 
+function fix_doctest(result::Result, str, doc::Documents.Document)
+    code = result.block.code
+    filename = Base.find_source_file(result.file)
+    # read the file containing the code block
+    content = read(filename, String)
+    # output stream
+    io = Compat.IOBuffer(sizehint = sizeof(content))
+    # first look for the entire code block
+    # make a regex of the code that matches leading whitespace
+    rcode = "(\\h*)" * replace(regex_escape(code), "\\n" => "\\n\\h*")
+    r = Regex(rcode)
+    codeidx = Compat.findfirst(r, content)
+    if codeidx === nothing
+        Utilities.warn("Could not find code block in source file")
+        return
+    end
+    # use the capture group to identify indentation
+    indent = match(r, content).captures[1]
+    # write everything up until the code block
+    write(io, content[1:prevind(content, first(codeidx))])
+    # next look for the particular input string in the given code block
+    # make a regex of the input that matches leading whitespace (for multiline input)
+    rinput = "\\h*" * replace(regex_escape(result.input), "\\n" => "\\n\\h*")
+    r = Regex(rinput)
+    inputidx = Compat.findfirst(r, code)
+    if inputidx === nothing
+        Utilities.warn("Could not find input line in code block")
+        return
+    end
+    # construct the new code-snippet (without indent)
+    # first part: everything up until the last index of the input string
+    newcode = code[1:last(inputidx)]
+    # second part: the rest, with the old output replaced with the new one
+    newcode *= replace(code[nextind(code, last(inputidx)):end], result.output => str, count = 1)
+    # replace internal code block with the non-indented new code, needed if we come back
+    # looking to replace output in the same code block later
+    result.block.code = newcode
+    # write the new code snippet to the stream, with indent
+    newcode = replace(newcode, r"^(.+)$"m => Base.SubstitutionString(indent * "\\1"))
+    write(io, newcode)
+    # write rest of the file
+    write(io, content[nextind(content, last(codeidx)):end])
+    # write to file
+    write(filename, seekstart(io))
+    return
+end
+
 # Remove terminal colors.
 
 const TERM_COLOR_REGEX = r"\e\[[0-9;]*m"
-remove_term_colors(s) = replace(s, TERM_COLOR_REGEX, "")
+remove_term_colors(s) = replace(s, TERM_COLOR_REGEX => "")
 
 # REPL doctest splitter.
 
@@ -351,12 +463,12 @@ function repl_splitter(code)
     output = String[]
     buffer = IOBuffer()
     while !isempty(lines)
-        line = shift!(lines)
+        line = popfirst!(lines)
         # REPL code blocks may contain leading lines with comments. Drop them.
         # TODO: handle multiline comments?
         # ANON_FUNC_DECLARATION deals with `x->x` -> `#1 (generic function ....)` on 0.7
         # TODO: Remove this special case and just disallow lines with comments?
-        startswith(line, '#') && !ismatch(ANON_FUNC_DECLARATION, line) && continue
+        startswith(line, '#') && !occursin(ANON_FUNC_DECLARATION, line) && continue
         prompt = match(PROMPT_REGEX, line)
         if prompt === nothing
             source = match(SOURCE_REGEX, line)
@@ -377,15 +489,15 @@ function repl_splitter(code)
 end
 
 function savebuffer!(out, buf)
-    n = nb_available(seekstart(buf))
-    n > 0 ? push!(out, rstrip(Utilities.takebuf_str(buf))) : out
+    n = bytesavailable(seekstart(buf))
+    n > 0 ? push!(out, rstrip(String(take!(buf)))) : out
 end
 
 function takeuntil!(r, buf, lines)
     while !isempty(lines)
         line = lines[1]
-        if !ismatch(r, line)
-            println(buf, shift!(lines))
+        if !occursin(r, line)
+            println(buf, popfirst!(lines))
         else
             break
         end
@@ -407,7 +519,7 @@ function footnotes(doc::Documents.Document)
         empty!(page.globals.meta)
         orphans = Dict{String, Tuple{Int, Int}}()
         for element in page.elements
-            Walkers.walk(page.globals.meta, page.mapping[element]) do block
+            Documents.walk(page.globals.meta, page.mapping[element]) do block
                 footnote(block, orphans)
             end
         end
@@ -461,7 +573,7 @@ function linkcheck(doc::Documents.Document)
             for (src, page) in doc.internal.pages
                 println("   - ", src)
                 for element in page.elements
-                    Walkers.walk(page.globals.meta, page.mapping[element]) do block
+                    Documents.walk(page.globals.meta, page.mapping[element]) do block
                         linkcheck(block, doc)
                     end
                 end
@@ -474,13 +586,13 @@ function linkcheck(doc::Documents.Document)
     return nothing
 end
 
-function linkcheck(link::Base.Markdown.Link, doc::Documents.Document)
+function linkcheck(link::Markdown.Link, doc::Documents.Document)
     INDENT = " "^6
 
     # first, make sure we're not supposed to ignore this link
     for r in doc.user.linkcheck_ignore
         if linkcheck_ismatch(r, link.url)
-            print_with_color(:normal, INDENT, "--- ", link.url, "\n")
+            printstyled(INDENT, "--- ", link.url, "\n", color=:normal)
             return false
         end
     end
@@ -495,22 +607,22 @@ function linkcheck(link::Base.Markdown.Link, doc::Documents.Document)
             return false
         end
         local STATUS_REGEX   = r"^HTTP/1.1 (\d+) (.+)$"m
-        if ismatch(STATUS_REGEX, result)
+        if occursin(STATUS_REGEX, result)
             status = parse(Int, match(STATUS_REGEX, result).captures[1])
             if status < 300
-                print_with_color(:green, INDENT, "$(status) ", link.url, "\n")
+                printstyled(INDENT, "$(status) ", link.url, "\n", color=:green)
             elseif status < 400
                 LOCATION_REGEX = r"^Location: (.+)$"m
-                if ismatch(LOCATION_REGEX, result)
+                if occursin(LOCATION_REGEX, result)
                     location = strip(match(LOCATION_REGEX, result).captures[1])
-                    print_with_color(:yellow, INDENT, "$(status) ", link.url, "\n")
-                    print_with_color(:yellow, INDENT, " -> ", location, "\n\n")
+                    printstyled(INDENT, "$(status) ", link.url, "\n", color=:yellow)
+                    printstyled(INDENT, " -> ", location, "\n\n", color=:yellow)
                 else
-                    print_with_color(:yellow, INDENT, "$(status) ", link.url, "\n")
+                    printstyled(INDENT, "$(status) ", link.url, "\n", color=:yellow)
                 end
             else
                 push!(doc.internal.errors, :linkcheck)
-                print_with_color(:red, INDENT, "$(status) ", link.url, "\n")
+                printstyled(INDENT, "$(status) ", link.url, "\n", color=:red)
             end
         else
             push!(doc.internal.errors, :linkcheck)
@@ -522,7 +634,7 @@ end
 linkcheck(other, doc::Documents.Document) = true
 
 linkcheck_ismatch(r::String, url) = (url == r)
-linkcheck_ismatch(r::Regex, url) = ismatch(r, url)
+linkcheck_ismatch(r::Regex, url) = occursin(r, url)
 
 function disable_color(func)
     orig = setcolor!(false)
@@ -535,7 +647,7 @@ end
 
 const CAN_INLINE = Ref(true)
 function __init__()
-    global setcolor! = eval(Base, :(x -> (y = have_color; global have_color = x; y)))
+    global setcolor! = Core.eval(Base, :(x -> (y = have_color; global have_color = x; y)))
     CAN_INLINE[] = Base.JLOptions().can_inline == 0 ? false : true
 end
 

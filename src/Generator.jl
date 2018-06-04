@@ -4,12 +4,13 @@ Provides the functions related to generating documentation stubs.
 module Generator
 
 using DocStringExtensions
+using Compat: @info
 
 """
 $(SIGNATURES)
 
 Attempts to save a file at `\$(root)/\$(filename)`. `f` will be called with file
-stream (see [`open`](https://docs.julialang.org/en/latest/stdlib/io-network.html#Base.open)).
+stream (see [`open`](https://docs.julialang.org/en/latest/base/io-network/#Base.open)).
 
 `filename` can also be a file in a subdirectory (e.g. `src/index.md`), and then
 then subdirectories will be created automatically.
@@ -17,7 +18,7 @@ then subdirectories will be created automatically.
 function savefile(f, root, filename)
     filepath = joinpath(root, filename)
     if ispath(filepath) error("$(filepath) already exists") end
-    info("Generating $filename at $filepath")
+    @info("Generating $filename at $filepath")
     mkpath(dirname(filepath))
     open(f,filepath,"w")
 end
